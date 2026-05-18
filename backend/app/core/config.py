@@ -38,7 +38,6 @@ def _get_int_env(name: str, default: int) -> int:
         return default
     return int(value)
 
-
 def _get_float_env(name: str, default: float) -> float:
     """Read a float environment variable with a safe default."""
     value = os.getenv(name, "").strip()
@@ -73,6 +72,9 @@ LLM_TIMEOUT = get_llm_config().timeout
 LLM_TEMPERATURE = get_llm_config().temperature
 
 
+"""
+    文件夹不存在则创建
+"""
 def ensure_storage_dirs() -> None:
     """Create local storage directories if they do not exist."""
     PAPERS_DIR.mkdir(parents=True, exist_ok=True)

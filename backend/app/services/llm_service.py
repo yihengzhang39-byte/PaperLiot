@@ -9,6 +9,9 @@ from urllib.request import Request, urlopen
 from app.core.config import LLMConfig, get_llm_config
 
 
+"""
+找论文文本里第一行有效内容
+"""
 def _first_non_empty_line(text: str) -> str:
     """Return the first meaningful line from text."""
     for line in text.splitlines():
@@ -17,7 +20,7 @@ def _first_non_empty_line(text: str) -> str:
             return cleaned
     return ""
 
-
+"""把 AI 输出转成标准列表，防止格式错乱，方便后续处理"""
 def _ensure_list(value: Any) -> list[str]:
     """Normalize a model output value to a list of strings."""
     if isinstance(value, list):
@@ -26,7 +29,9 @@ def _ensure_list(value: Any) -> list[str]:
         return [value.strip()]
     return []
 
-
+"""
+AI 经常返回带 json 标记的内容，这个函数删掉标记，只留纯 JSON，增加解析成功率
+"""
 def _clean_json_content(content: str) -> str:
     """Remove common Markdown code fences before JSON parsing."""
     cleaned = content.strip()
@@ -42,7 +47,9 @@ def _clean_json_content(content: str) -> str:
 
     return cleaned
 
-
+"""
+解析 JSON，解析失败就报错，告诉你 AI 返回了无效数据
+"""
 def _parse_json_response(content: str) -> dict[str, Any]:
     """Parse a JSON object from LLM response text."""
     cleaned = _clean_json_content(content)
@@ -150,7 +157,6 @@ def mock_extract_paper_info(text: str) -> dict[str, object]:
         "abstract": abstract or "这里是 mock 摘要。后续可替换为真实 LLM 抽取结果。",
     }
 
-
 def mock_analyze_method(text: str) -> dict[str, object]:
     """Mock method analysis with a stable structured response."""
     has_content = bool(text.strip())
@@ -173,7 +179,6 @@ def mock_analyze_method(text: str) -> dict[str, object]:
             "可以增加多论文对比、Related Work 生成和知识库检索。",
         ],
     }
-
 
 def mock_analyze_experiment(text: str) -> dict[str, str]:
     """Mock experiment analysis with a stable structured response."""
@@ -256,8 +261,6 @@ def analyze_method(text: str) -> dict[str, object]:
         "limitations": _ensure_list(data.get("limitations", [])),
         "inspirations": _ensure_list(data.get("inspirations", [])),
     }
-
-
 def analyze_experiment(text: str) -> dict[str, str]:
     """Analyze experiment-related content with the configured provider."""
     if get_llm_config().provider == "mock":
