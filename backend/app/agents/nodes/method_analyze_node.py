@@ -10,6 +10,7 @@ def method_analyze_node(state: PaperState) -> dict[str, object]:
         [
             state.get("abstract", ""),
             state.get("introduction", ""),
+            state.get("related_work", ""),
             state.get("method", ""),
         ]
     )[:20000]

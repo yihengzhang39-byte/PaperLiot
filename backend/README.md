@@ -137,10 +137,21 @@ http://127.0.0.1:8000/docs
 curl http://127.0.0.1:8000/health
 ```
 
+## 章节抽取策略
+
+当前 `section_extract_node` 使用“规则优先 + LLM 兜底”：
+
+- 先通过常见标题规则切分 `Abstract`、`Introduction`、`Related Work/Background`、`Method`、`Experiments`、`Conclusion`
+- 支持大小写不敏感、阿拉伯数字编号和罗马数字编号，例如 `1 Introduction`、`2. Related Work`、`III. Methodology`
+- 如果规则已经抽到 `method` 和 `experiments`，直接使用规则结果
+- 如果 `method` 或 `experiments` 缺失，会调用当前配置的 LLM Provider 做章节归类兜底
+- 兜底时最多传入论文前 40000 字，要求模型只复制原文章节内容，不总结、不改写
+- `References` 及其之后的内容不会放入 `conclusion`
+
 ## 当前限制
 
 - 只支持单篇论文精读
-- 章节抽取还是规则版，复杂 PDF 版式下可能不稳定
+- 章节抽取已支持规则优先 + LLM 兜底，但复杂 PDF 版式下仍可能不稳定
 - 长论文目前是简单截断，还没有 chunk / RAG
 - 还没有 MySQL、任务状态、异步队列和前端
 

@@ -17,6 +17,7 @@ class PaperState(TypedDict):
 
     abstract: str
     introduction: str
+    related_work: str
     method: str
     experiments: str
     conclusion: str

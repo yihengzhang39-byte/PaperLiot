@@ -190,6 +190,51 @@ def mock_analyze_experiment(text: str) -> dict[str, str]:
     return {"experiment_summary": summary}
 
 
+def extract_sections_with_llm(raw_text: str) -> dict[str, str]:
+    """Extract paper sections with the configured LLM provider."""
+    section_keys = [
+        "abstract",
+        "introduction",
+        "related_work",
+        "method",
+        "experiments",
+        "conclusion",
+    ]
+    if get_llm_config().provider == "mock":
+        return {key: "" for key in section_keys}
+
+    system_prompt = (
+        "你是一个严谨的计算机视觉/目标检测论文结构识别助手。"
+        "请只返回 JSON，不要返回 Markdown、解释或额外文本。"
+        "你的任务是把原文内容归类到章节字段中，不要改写，不要总结，不要翻译。"
+        "如果没有明确章节内容，对应字段返回空字符串。"
+    )
+    user_prompt = f"""请从下面论文文本中识别并归类章节内容，输出 JSON：
+
+{{
+  "abstract": "",
+  "introduction": "",
+  "related_work": "",
+  "method": "",
+  "experiments": "",
+  "conclusion": ""
+}}
+
+要求：
+- 只复制原文中对应章节的内容，不要总结或改写
+- Related Work 和 Background 都可归入 related_work
+- Method、Methods、Methodology、Approach、Proposed Method 都可归入 method
+- Experiments、Experimental Results、Evaluation、Results、Ablation Study 都可归入 experiments
+- References 及其之后的内容不要放入 conclusion
+- 没有明确章节时返回空字符串
+
+论文文本：
+{raw_text[:40000]}
+"""
+    data = call_llm_json(system_prompt, user_prompt)
+    return {key: str(data.get(key, "") or "") for key in section_keys}
+
+
 def extract_paper_info(text: str) -> dict[str, object]:
     """Extract paper metadata with the configured provider."""
     if get_llm_config().provider == "mock":
@@ -233,7 +278,7 @@ def analyze_method(text: str) -> dict[str, object]:
         "请面向中文科研笔记写作，只返回 JSON。"
         "如果信息不足，字段写“未明确提及”，不要编造。"
     )
-    user_prompt = f"""请分析下面论文的摘要、引言和方法内容，输出 JSON：
+    user_prompt = f"""请分析下面论文的摘要、引言、相关工作和方法内容，输出 JSON：
 
 {{
   "problem": "",
