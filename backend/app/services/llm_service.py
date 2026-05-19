@@ -204,7 +204,7 @@ def extract_sections_with_llm(raw_text: str) -> dict[str, str]:
         return {key: "" for key in section_keys}
 
     system_prompt = (
-        "你是一个严谨的计算机视觉/目标检测论文结构识别助手。"
+        "你是一个严谨的论文结构识别助手。"
         "请只返回 JSON，不要返回 Markdown、解释或额外文本。"
         "你的任务是把原文内容归类到章节字段中，不要改写，不要总结，不要翻译。"
         "如果没有明确章节内容，对应字段返回空字符串。"
@@ -223,8 +223,8 @@ def extract_sections_with_llm(raw_text: str) -> dict[str, str]:
 要求：
 - 只复制原文中对应章节的内容，不要总结或改写
 - Related Work 和 Background 都可归入 related_work
-- Method、Methods、Methodology、Approach、Proposed Method 都可归入 method
-- Experiments、Experimental Results、Evaluation、Results、Ablation Study 都可归入 experiments
+- Method、Methods、Methodology、Approach、Proposed Method、Proposed Approach、Our Method、Our Approach 都可归入 method
+- Experiments、Experimental Results、Evaluation、Results、Results and Discussion、Ablation Study 都可归入 experiments
 - References 及其之后的内容不要放入 conclusion
 - 没有明确章节时返回空字符串
 

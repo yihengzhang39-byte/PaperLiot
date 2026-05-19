@@ -21,6 +21,7 @@ class PaperState(TypedDict):
     method: str
     experiments: str
     conclusion: str
+    section_meta: dict[str, dict[str, object]]
 
     problem: str
     motivation: str

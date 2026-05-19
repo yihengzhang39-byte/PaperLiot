@@ -11,6 +11,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.agents.paper_graph import analyze_paper  # noqa: E402
+from app.agents.nodes.section_extract_node import format_section_debug_info  # noqa: E402
 from app.core.config import ensure_storage_dirs  # noqa: E402
 
 
@@ -28,6 +29,8 @@ def main() -> None:
 
     print(f"paper_id: {paper_id}")
     print(f"note_path: {result.get('note_path', '')}")
+    print()
+    print(format_section_debug_info(result.get("section_meta", {})))
     print("\nfinal_note preview:")
     print(result.get("final_note", "")[:1000])
 

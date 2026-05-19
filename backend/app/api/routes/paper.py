@@ -52,6 +52,7 @@ def analyze_uploaded_paper(paper_id: str) -> dict[str, object]:
             "model": llm_config.model,
             "success": False,
             "error_message": str(exc),
+            "section_meta": {},
         }
 
     return {
@@ -62,6 +63,7 @@ def analyze_uploaded_paper(paper_id: str) -> dict[str, object]:
         "model": llm_config.model,
         "success": True,
         "error_message": "",
+        "section_meta": result.get("section_meta", {}),
     }
 
 

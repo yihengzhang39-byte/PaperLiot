@@ -21,6 +21,7 @@ class PaperAnalyzeResponse(BaseModel):
     model: str
     success: bool
     error_message: str
+    section_meta: dict[str, dict[str, object]]
 
 
 class PaperNoteResponse(BaseModel):

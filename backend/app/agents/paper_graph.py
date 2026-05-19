@@ -49,6 +49,7 @@ def _initial_state(pdf_path: str, paper_id: str) -> PaperState:
         "method": "",
         "experiments": "",
         "conclusion": "",
+        "section_meta": {},
         "problem": "",
         "motivation": "",
         "method_summary": "",
