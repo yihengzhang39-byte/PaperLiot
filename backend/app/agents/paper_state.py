@@ -1,20 +1,28 @@
 """State definition for the single-paper reading workflow."""
 
-from typing import TypedDict
+from typing import TypedDict,Any
 
 
-class PaperState(TypedDict):
+class PaperState(TypedDict, total=False):
     """Shared state passed between LangGraph paper-analysis nodes."""
 
+    # 初始输入
     pdf_path: str
     paper_id: str
-    raw_text: str
 
+    # PDF 解析结果
+    raw_text: str
+    parsed_paper: dict[str, Any]
+    parser_name: str
+    parser_warnings: list[str]
+
+    # 论文基础信息
     title: str
     authors: list[str]
     year: str
     venue: str
 
+    # 章节内容
     abstract: str
     introduction: str
     related_work: str
@@ -23,6 +31,7 @@ class PaperState(TypedDict):
     conclusion: str
     section_meta: dict[str, dict[str, object]]
 
+    # 分析结果
     problem: str
     motivation: str
     method_summary: str
@@ -31,5 +40,6 @@ class PaperState(TypedDict):
     limitations: list[str]
     inspirations: list[str]
 
+    # 最终笔记
     final_note: str
     note_path: str

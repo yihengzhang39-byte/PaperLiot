@@ -9,6 +9,7 @@ from app.agents.nodes.pdf_parse_node import pdf_parse_node
 from app.agents.nodes.section_extract_node import section_extract_node
 from app.agents.nodes.summary_write_node import summary_write_node
 from app.agents.paper_state import PaperState
+from app.services.file_service import save_paper_sections_json
 
 
 def build_paper_graph():
@@ -66,4 +67,8 @@ def analyze_paper(pdf_path: str, paper_id: str) -> PaperState:
     """Run the paper-analysis graph for a PDF."""
     graph = build_paper_graph()
     result = graph.invoke(_initial_state(pdf_path, paper_id))
+    try:
+        save_paper_sections_json(result)
+    except Exception as exc:
+        print(f"[PaperPilot warning] Failed to save section JSON: {exc}")
     return result

@@ -1,11 +1,19 @@
 """Local file storage utilities for PDFs and Markdown notes."""
 
+import json
 from pathlib import Path
+import re
+from typing import Mapping, Any
 from uuid import uuid4
 
 from fastapi import UploadFile
 
-from app.core.config import NOTES_DIR, PAPERS_DIR, ensure_storage_dirs
+from app.core.config import (
+    NOTES_DIR,
+    PAPER_SECTION_JSON_DIR,
+    PAPERS_DIR,
+    ensure_storage_dirs,
+)
 
 
 def generate_paper_id() -> str:
@@ -16,6 +24,22 @@ def generate_paper_id() -> str:
 def _safe_filename(filename: str) -> str:
     """Keep only a safe basename for local storage."""
     return Path(filename).name.replace(" ", "_")
+
+
+def _safe_json_filename(filename: str) -> str:
+    """Build a filesystem-safe JSON filename from the original PDF name."""
+    stem = Path(filename).stem or "paper_sections"
+    safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", stem).strip(" ._")
+    return f"{safe_stem or 'paper_sections'}.json"
+
+
+def _original_pdf_filename(pdf_path: str, paper_id: str) -> str:
+    """Recover the original upload filename when storage added a paper_id prefix."""
+    filename = Path(pdf_path).name
+    prefix = f"{paper_id}_"
+    if filename.startswith(prefix):
+        return filename[len(prefix) :]
+    return filename
 
 
 def save_upload_pdf(file: UploadFile) -> dict[str, str]:
@@ -62,3 +86,30 @@ def read_note(paper_id: str) -> str | None:
     if not note_path.exists():
         return None
     return note_path.read_text(encoding="utf-8")
+
+
+def save_paper_sections_json(state: Mapping[str, Any]) -> Path:
+    """Save extracted paper sections and metadata as a UTF-8 JSON file."""
+    ensure_storage_dirs()
+    paper_id = str(state.get("paper_id", ""))
+    filename = _original_pdf_filename(str(state.get("pdf_path", "")), paper_id)
+    output_path = PAPER_SECTION_JSON_DIR / _safe_json_filename(filename)
+
+    payload = {
+        "paper_id": paper_id,
+        "filename": filename,
+        "abstract": state.get("abstract", ""),
+        "introduction": state.get("introduction", ""),
+        "related_work": state.get("related_work", ""),
+        "method": state.get("method", ""),
+        "experiments": state.get("experiments", ""),
+        "conclusion": state.get("conclusion", ""),
+        "section_meta": state.get("section_meta", {}),
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return output_path

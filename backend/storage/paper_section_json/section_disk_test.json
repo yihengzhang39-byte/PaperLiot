@@ -1,0 +1,60 @@
+{
+  "paper_id": "07800f081c704f7a89cacb043649e962",
+  "filename": "section_disk_test.pdf",
+  "abstract": "This paper tests section JSON persistence.",
+  "introduction": "We need saved parsed sections for debugging.",
+  "related_work": "Previous tools do not persist enough section metadata.",
+  "method": "We save extracted sections and section_meta as JSON.",
+  "experiments": "The JSON file can be inspected after analyze.",
+  "conclusion": "Persisted section JSON improves debugging.",
+  "section_meta": {
+    "abstract": {
+      "source": "rule",
+      "matched_title": "Abstract",
+      "length": 42,
+      "start_char": 48,
+      "end_char": 92,
+      "warning": ""
+    },
+    "introduction": {
+      "source": "rule",
+      "matched_title": "1 Introduction",
+      "length": 44,
+      "start_char": 106,
+      "end_char": 152,
+      "warning": "rule section is very short; LLM correction may be useful"
+    },
+    "related_work": {
+      "source": "rule",
+      "matched_title": "2 Related Work",
+      "length": 54,
+      "start_char": 166,
+      "end_char": 222,
+      "warning": "rule section is very short; LLM correction may be useful"
+    },
+    "method": {
+      "source": "rule",
+      "matched_title": "III. Our Method",
+      "length": 52,
+      "start_char": 237,
+      "end_char": 291,
+      "warning": "rule section is very short; LLM correction may be useful"
+    },
+    "experiments": {
+      "source": "rule",
+      "matched_title": "IV. Results and Discussion",
+      "length": 45,
+      "start_char": 317,
+      "end_char": 364,
+      "warning": "rule section is very short; LLM correction may be useful"
+    },
+    "conclusion": {
+      "source": "rule",
+      "matched_title": "V. Conclusion",
+      "length": 42,
+      "start_char": 377,
+      "end_char": 421,
+      "warning": "rule section is very short; LLM correction may be useful"
+    }
+  }
+}

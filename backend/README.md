@@ -197,6 +197,21 @@ API 调试方式：
 }
 ```
 
+章节解析 JSON 落盘：
+
+- 每次 CLI 或 API 成功完成 analyze 后，都会尝试保存章节解析结果
+- 保存目录：`backend/storage/paper_section_json/`
+- 文件名：原 PDF 文件名加 `.json`，例如 `sam2.pdf` 会保存为 `sam2.json`
+- 保存内容包含 `paper_id`、`filename`、六个章节正文和 `section_meta`
+- JSON 使用 UTF-8 和 `ensure_ascii=False` 保存，方便直接查看中文
+- 如果保存失败，只会打印 warning，不会影响 analyze 主流程
+
+示例路径：
+
+```text
+D:\Agent-paper\backend\storage\paper_section_json\sam2.json
+```
+
 ## 当前限制
 
 - 只支持单篇论文精读

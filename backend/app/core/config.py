@@ -14,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 STORAGE_DIR = BASE_DIR / "storage"
 PAPERS_DIR = STORAGE_DIR / "papers"
 NOTES_DIR = STORAGE_DIR / "notes"
+PAPER_SECTION_JSON_DIR = STORAGE_DIR / "paper_section_json"
 
 if load_dotenv is not None:
     load_dotenv(BASE_DIR / ".env")
@@ -79,3 +80,4 @@ def ensure_storage_dirs() -> None:
     """Create local storage directories if they do not exist."""
     PAPERS_DIR.mkdir(parents=True, exist_ok=True)
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    PAPER_SECTION_JSON_DIR.mkdir(parents=True, exist_ok=True)
