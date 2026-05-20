@@ -4,6 +4,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.nodes.experiment_analyze_node import experiment_analyze_node
 from app.agents.nodes.method_analyze_node import method_analyze_node
+from app.agents.nodes.paper_info_enrich_node import paper_info_enrich_node
 from app.agents.nodes.paper_info_node import paper_info_node
 from app.agents.nodes.pdf_parse_node import pdf_parse_node
 from app.agents.nodes.section_extract_node import section_extract_node
@@ -18,6 +19,7 @@ def build_paper_graph():
 
     builder.add_node("pdf_parse_node", pdf_parse_node)
     builder.add_node("paper_info_node", paper_info_node)
+    builder.add_node("paper_info_enrich_node", paper_info_enrich_node)
     builder.add_node("section_extract_node", section_extract_node)
     builder.add_node("method_analyze_node", method_analyze_node)
     builder.add_node("experiment_analyze_node", experiment_analyze_node)
@@ -25,7 +27,8 @@ def build_paper_graph():
 
     builder.add_edge(START, "pdf_parse_node")
     builder.add_edge("pdf_parse_node", "paper_info_node")
-    builder.add_edge("paper_info_node", "section_extract_node")
+    builder.add_edge("paper_info_node", "paper_info_enrich_node")
+    builder.add_edge("paper_info_enrich_node", "section_extract_node")
     builder.add_edge("section_extract_node", "method_analyze_node")
     builder.add_edge("method_analyze_node", "experiment_analyze_node")
     builder.add_edge("experiment_analyze_node", "summary_write_node")
@@ -51,6 +54,10 @@ def _initial_state(pdf_path: str, paper_id: str, paper_language: str = "zh") -> 
         "year": "",
         "venue": "",
         "paper_info_debug": {},
+        "missing_info_fields": [],
+        "need_web_search": False,
+        "web_search_results": [],
+        "web_search_debug": {},
         "abstract": "",
         "introduction": "",
         "related_work": "",

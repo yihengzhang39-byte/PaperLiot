@@ -25,6 +25,10 @@ class PaperState(TypedDict, total=False):
     year: str
     venue: str
     paper_info_debug: dict[str, object]
+    missing_info_fields: list[str]
+    need_web_search: bool
+    web_search_results: list[dict[str, object]]
+    web_search_debug: dict[str, object]
 
     # 章节内容
     abstract: str

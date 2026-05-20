@@ -24,6 +24,10 @@ class PaperAnalyzeResponse(BaseModel):
     error_message: str
     section_meta: dict[str, dict[str, object]]
     paper_info_debug: dict[str, object] = Field(default_factory=dict)
+    missing_info_fields: list[str] = Field(default_factory=list)
+    need_web_search: bool = False
+    web_search_debug: dict[str, object] = Field(default_factory=dict)
+    web_search_results: list[dict[str, object]] = Field(default_factory=list)
 
 
 class PaperNoteResponse(BaseModel):

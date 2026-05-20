@@ -7,7 +7,7 @@ from app.agents.paper_state import PaperState
 from app.services.llm_service import extract_paper_info
 
 
-UNCLEAR_VALUES = {"", "未明确提及", "unknown", "Unknown", "N/A", "无"}
+UNCLEAR_VALUES = {"", "未明确提及", "未知", "unknown", "Unknown", "N/A", "无", "暂无", "待识别论文标题"}
 
 
 def _contains_chinese(text: str) -> bool:
@@ -54,6 +54,19 @@ def _missing_fields(parsed_info: dict[str, object]) -> list[str]:
         field
         for field in fields
         if not _is_clear_value(parsed_info.get(field), field_name=field)
+    ]
+
+
+"""
+    # 功能：找缺失的论文必填字段
+"""
+def _missing_final_fields(info: dict[str, object]) -> list[str]:
+    """Return final metadata fields still missing after parser/LLM extraction."""
+    fields = ["title", "authors", "year", "venue", "abstract"]
+    return [
+        field
+        for field in fields
+        if not _is_clear_value(info.get(field), field_name=field)
     ]
 
 
@@ -235,11 +248,21 @@ def paper_info_node(state: PaperState) -> dict[str, object]:
         ),
     }
 
-    return {
+    final_info = {
         "title": str(final_title),
         "authors": final_authors,
         "year": str(final_year),
         "venue": str(final_venue),
         "abstract": final_abstract,
+    }
+    missing_info_fields = _missing_final_fields(final_info)
+    need_web_search = any(
+        field in missing_info_fields for field in ["title", "authors", "year", "venue"]
+    )
+
+    return {
+        **final_info,
         "paper_info_debug": paper_info_debug,
+        "missing_info_fields": missing_info_fields,
+        "need_web_search": need_web_search,
     }

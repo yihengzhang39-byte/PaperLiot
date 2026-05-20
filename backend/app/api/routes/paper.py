@@ -71,6 +71,10 @@ def analyze_uploaded_paper(
             "error_message": str(exc),
             "section_meta": {},
             "paper_info_debug": {},
+            "missing_info_fields": [],
+            "need_web_search": False,
+            "web_search_debug": {},
+            "web_search_results": [],
         }
 
     return {
@@ -83,6 +87,10 @@ def analyze_uploaded_paper(
         "error_message": "",
         "section_meta": result.get("section_meta", {}),
         "paper_info_debug": result.get("paper_info_debug", {}),
+        "missing_info_fields": result.get("missing_info_fields", []),
+        "need_web_search": result.get("need_web_search", False),
+        "web_search_debug": result.get("web_search_debug", {}),
+        "web_search_results": result.get("web_search_results", []),
     }
 
 

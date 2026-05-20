@@ -6,3 +6,4 @@ langgraph
 PyMuPDF
 python-dotenv
 requests
+langchain-core

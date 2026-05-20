@@ -42,6 +42,16 @@ class PDFParserConfig:
     timeout: int = 30
 
 
+@dataclass(frozen=True)
+class PaperLookupConfig:
+    """Runtime paper metadata lookup configuration."""
+
+    enabled: bool = False
+    timeout: int = 10
+    max_results: int = 5
+    providers: list[str] | None = None
+
+
 def _get_int_env(name: str, default: int) -> int:
     """Read an integer environment variable with a safe default."""
     value = os.getenv(name, "").strip()
@@ -55,6 +65,14 @@ def _get_float_env(name: str, default: float) -> float:
     if not value:
         return default
     return float(value)
+
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    """Read a boolean environment variable with a safe default."""
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
 
 
 def get_llm_config() -> LLMConfig:
@@ -85,6 +103,21 @@ def get_pdf_parser_config() -> PDFParserConfig:
     )
 
 
+def get_paper_lookup_config() -> PaperLookupConfig:
+    """Read paper metadata lookup configuration from environment variables."""
+    providers = [
+        provider.strip().lower()
+        for provider in os.getenv("PAPER_LOOKUP_PROVIDERS", "arxiv,crossref,openalex").split(",")
+        if provider.strip()
+    ]
+    return PaperLookupConfig(
+        enabled=_get_bool_env("PAPER_INFO_WEB_ENRICH_ENABLED", False),
+        timeout=_get_int_env("PAPER_LOOKUP_TIMEOUT", 10),
+        max_results=_get_int_env("PAPER_LOOKUP_MAX_RESULTS", 5),
+        providers=providers,
+    )
+
+
 LLM_PROVIDER = get_llm_config().provider
 LLM_API_KEY = get_llm_config().api_key
 LLM_BASE_URL = get_llm_config().base_url
@@ -95,6 +128,11 @@ LLM_TEMPERATURE = get_llm_config().temperature
 PDF_PARSER = get_pdf_parser_config().parser
 GROBID_BASE_URL = get_pdf_parser_config().grobid_base_url
 PDF_PARSER_TIMEOUT = get_pdf_parser_config().timeout
+
+PAPER_INFO_WEB_ENRICH_ENABLED = get_paper_lookup_config().enabled
+PAPER_LOOKUP_TIMEOUT = get_paper_lookup_config().timeout
+PAPER_LOOKUP_MAX_RESULTS = get_paper_lookup_config().max_results
+PAPER_LOOKUP_PROVIDERS = get_paper_lookup_config().providers
 
 
 """

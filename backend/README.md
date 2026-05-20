@@ -21,6 +21,8 @@ backend/
       parser_service.py
       llm_service.py
       file_service.py
+    tools/
+      paper_lookup_tools.py
     schemas/
     core/
       config.py
@@ -63,6 +65,10 @@ LLM_TEMPERATURE=0.2
 PDF_PARSER=pymupdf
 GROBID_BASE_URL=http://localhost:8070
 PDF_PARSER_TIMEOUT=30
+PAPER_INFO_WEB_ENRICH_ENABLED=false
+PAPER_LOOKUP_TIMEOUT=10
+PAPER_LOOKUP_MAX_RESULTS=5
+PAPER_LOOKUP_PROVIDERS=arxiv,crossref,openalex
 ```
 
 环境变量说明：
@@ -76,6 +82,10 @@ PDF_PARSER_TIMEOUT=30
 - `PDF_PARSER`：默认 `pymupdf`，可选 `pymupdf` / `grobid` / `docling` / `marker` / `mineru`
 - `GROBID_BASE_URL`：GROBID 服务地址，默认 `http://localhost:8070`
 - `PDF_PARSER_TIMEOUT`：parser 外部服务请求超时时间，默认 `30`
+- `PAPER_INFO_WEB_ENRICH_ENABLED`：是否启用论文元数据外部查询，默认 `false`
+- `PAPER_LOOKUP_TIMEOUT`：论文元数据工具请求超时时间，默认 `10`
+- `PAPER_LOOKUP_MAX_RESULTS`：每个 provider 最大候选数量，默认 `5`
+- `PAPER_LOOKUP_PROVIDERS`：启用的 provider，默认 `arxiv,crossref,openalex`
 
 ## PDF Parser 架构
 
@@ -126,6 +136,50 @@ PDF_PARSER_TIMEOUT=30
 如果非默认 parser 失败或返回空 `raw_text`，`parser_service` 会 fallback 到 `PyMuPDFParser`，保证单篇论文精读流程尽量继续运行。
 
 之所以仍保留 `raw_text`：当前章节抽取和 LLM 分析节点都依赖纯文本输入。新的 `ParsedPaper` 会同时写入 state 的 `parsed_paper`，方便后续比较 PyMuPDF / GROBID / Marker / MinerU / Docling 的结构化解析质量。
+
+## 论文信息提取与外部补全
+
+`paper_info_node` 负责 PDF 内部信息提取，优先级是：
+
+```text
+parser / parser_meta -> LLM -> default
+```
+
+它会输出 `paper_info_debug`，用于查看 `title/authors/year/venue/abstract` 每个字段来自 parser、parser_meta、LLM 还是默认值。
+
+`paper_info_enrich_node` 位于 `paper_info_node` 之后，负责外部信息补全。当前采用“方案 A”：
+
+- 工具函数用 `@tool` 封装，方便后续升级成 ToolNode + LLM 自主 tool calling
+- 当前不做 LLM 自主工具调用
+- 节点按规则手动调用工具
+- 工具只返回候选论文元数据，不直接修改 state
+- 节点只补缺失字段，不覆盖 parser 或 LLM 已明确提取的字段
+
+可复用工具：
+
+- `search_arxiv_paper`
+- `search_crossref_paper`
+- `search_openalex_paper`
+
+默认关闭外部查询：
+
+```env
+PAPER_INFO_WEB_ENRICH_ENABLED=false
+```
+
+开启示例：
+
+```env
+PAPER_INFO_WEB_ENRICH_ENABLED=true
+PAPER_LOOKUP_PROVIDERS=arxiv,crossref,openalex
+```
+
+触发规则：
+
+- 如果 `title/authors/year/venue` 任一缺失，则 `need_web_search=true`
+- 如果只缺 `abstract`，默认不触发外部查询
+- 开启外部查询后，只有候选 `confidence >= 0.75` 才允许补充缺失字段
+- analyze 响应中会返回 `missing_info_fields`、`need_web_search`、`web_search_debug` 和 `web_search_results`
 
 ### GROBID 使用说明
 
