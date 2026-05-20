@@ -9,18 +9,22 @@ class PaperState(TypedDict, total=False):
     # 初始输入
     pdf_path: str
     paper_id: str
+    paper_language: str
 
     # PDF 解析结果
     raw_text: str
     parsed_paper: dict[str, Any]
     parser_name: str
     parser_warnings: list[str]
+    requested_parser: str
+    parser_meta: dict[str, Any]
 
     # 论文基础信息
     title: str
     authors: list[str]
     year: str
     venue: str
+    paper_info_debug: dict[str, object]
 
     # 章节内容
     abstract: str

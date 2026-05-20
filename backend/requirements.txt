@@ -5,3 +5,4 @@ pydantic
 langgraph
 PyMuPDF
 python-dotenv
+requests

@@ -15,6 +15,7 @@ STORAGE_DIR = BASE_DIR / "storage"
 PAPERS_DIR = STORAGE_DIR / "papers"
 NOTES_DIR = STORAGE_DIR / "notes"
 PAPER_SECTION_JSON_DIR = STORAGE_DIR / "paper_section_json"
+PAPER_METADATA_DIR = STORAGE_DIR / "paper_metadata"
 
 if load_dotenv is not None:
     load_dotenv(BASE_DIR / ".env")
@@ -30,6 +31,15 @@ class LLMConfig:
     model: str = ""
     timeout: int = 60
     temperature: float = 0.2
+
+
+@dataclass(frozen=True)
+class PDFParserConfig:
+    """Runtime PDF parser configuration."""
+
+    parser: str = "pymupdf"
+    grobid_base_url: str = "http://localhost:8070"
+    timeout: int = 30
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -65,12 +75,26 @@ def get_llm_config() -> LLMConfig:
     )
 
 
+def get_pdf_parser_config() -> PDFParserConfig:
+    """Read PDF parser configuration from environment variables."""
+    parser = os.getenv("PDF_PARSER", "pymupdf").strip().lower() or "pymupdf"
+    return PDFParserConfig(
+        parser=parser,
+        grobid_base_url=os.getenv("GROBID_BASE_URL", "http://localhost:8070").strip().rstrip("/"),
+        timeout=_get_int_env("PDF_PARSER_TIMEOUT", 30),
+    )
+
+
 LLM_PROVIDER = get_llm_config().provider
 LLM_API_KEY = get_llm_config().api_key
 LLM_BASE_URL = get_llm_config().base_url
 LLM_MODEL = get_llm_config().model
 LLM_TIMEOUT = get_llm_config().timeout
 LLM_TEMPERATURE = get_llm_config().temperature
+
+PDF_PARSER = get_pdf_parser_config().parser
+GROBID_BASE_URL = get_pdf_parser_config().grobid_base_url
+PDF_PARSER_TIMEOUT = get_pdf_parser_config().timeout
 
 
 """
@@ -81,3 +105,4 @@ def ensure_storage_dirs() -> None:
     PAPERS_DIR.mkdir(parents=True, exist_ok=True)
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
     PAPER_SECTION_JSON_DIR.mkdir(parents=True, exist_ok=True)
+    PAPER_METADATA_DIR.mkdir(parents=True, exist_ok=True)

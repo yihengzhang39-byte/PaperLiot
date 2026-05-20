@@ -235,17 +235,26 @@ def extract_sections_with_llm(raw_text: str) -> dict[str, str]:
     return {key: str(data.get(key, "") or "") for key in section_keys}
 
 
-def extract_paper_info(text: str) -> dict[str, object]:
+def extract_paper_info(
+    text: str,
+    missing_fields: list[str] | None = None,
+    paper_language: str = "zh",
+    parser_info: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Extract paper metadata with the configured provider."""
     if get_llm_config().provider == "mock":
         return mock_extract_paper_info(text)
 
+    missing_fields = missing_fields or ["title", "authors", "year", "venue", "abstract"]
+    parser_info = parser_info or {}
+    language_note = "中文论文，摘要必须返回中文，不要翻译成英文。" if paper_language == "zh" else "英文论文，摘要返回英文。"
     system_prompt = (
-        "你是一个严谨的计算机视觉/目标检测论文阅读助手。"
+        "你是一个严谨的论文阅读助手。"
         "请只返回 JSON，不要返回 Markdown、解释或额外文本。"
         "如果论文中信息不足，对应字段写“未明确提及”，不要编造。"
+        "只能根据给定 raw_text 提取信息，不要覆盖 parser 已经给出的明确信息。"
     )
-    user_prompt = f"""请从下面论文文本中抽取基本信息，输出 JSON：
+    user_prompt = f"""请从下面论文文本中补充缺失的论文基本信息，输出 JSON：
 
 {{
   "title": "",
@@ -254,6 +263,19 @@ def extract_paper_info(text: str) -> dict[str, object]:
   "venue": "",
   "abstract": ""
 }}
+
+需要补充的字段：
+{missing_fields}
+
+parser 已经明确提取的信息，不要覆盖：
+{json.dumps(parser_info, ensure_ascii=False)}
+
+要求：
+- 只根据给定 raw_text 提取
+- 不要翻译摘要
+- {language_note}
+- 不确定就返回“未明确提及”
+- 输出 JSON
 
 论文文本：
 {text}

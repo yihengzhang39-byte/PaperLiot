@@ -1,6 +1,6 @@
 """Pydantic models for paper APIs."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PaperUploadResponse(BaseModel):
@@ -9,6 +9,7 @@ class PaperUploadResponse(BaseModel):
     paper_id: str
     filename: str
     file_path: str
+    paper_language: str = "zh"
 
 
 class PaperAnalyzeResponse(BaseModel):
@@ -22,6 +23,7 @@ class PaperAnalyzeResponse(BaseModel):
     success: bool
     error_message: str
     section_meta: dict[str, dict[str, object]]
+    paper_info_debug: dict[str, object] = Field(default_factory=dict)
 
 
 class PaperNoteResponse(BaseModel):

@@ -34,16 +34,23 @@ def build_paper_graph():
     return builder.compile()
 
 
-def _initial_state(pdf_path: str, paper_id: str) -> PaperState:
+def _initial_state(pdf_path: str, paper_id: str, paper_language: str = "zh") -> PaperState:
     """Create an empty initial state for a paper-analysis run."""
     return {
         "pdf_path": pdf_path,
         "paper_id": paper_id,
+        "paper_language": paper_language if paper_language in {"zh", "en"} else "zh",
         "raw_text": "",
+        "parsed_paper": {},
+        "parser_name": "",
+        "parser_warnings": [],
+        "requested_parser": "",
+        "parser_meta": {},
         "title": "",
         "authors": [],
         "year": "",
         "venue": "",
+        "paper_info_debug": {},
         "abstract": "",
         "introduction": "",
         "related_work": "",
@@ -63,10 +70,10 @@ def _initial_state(pdf_path: str, paper_id: str) -> PaperState:
     }
 
 
-def analyze_paper(pdf_path: str, paper_id: str) -> PaperState:
+def analyze_paper(pdf_path: str, paper_id: str, paper_language: str = "zh") -> PaperState:
     """Run the paper-analysis graph for a PDF."""
     graph = build_paper_graph()
-    result = graph.invoke(_initial_state(pdf_path, paper_id))
+    result = graph.invoke(_initial_state(pdf_path, paper_id, paper_language))
     try:
         save_paper_sections_json(result)
     except Exception as exc:

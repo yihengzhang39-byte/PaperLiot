@@ -16,7 +16,9 @@ backend/
       paper_graph.py
       nodes/
     services/
+      parsers/
       pdf_service.py
+      parser_service.py
       llm_service.py
       file_service.py
     schemas/
@@ -58,6 +60,9 @@ LLM_BASE_URL=
 LLM_MODEL=
 LLM_TIMEOUT=60
 LLM_TEMPERATURE=0.2
+PDF_PARSER=pymupdf
+GROBID_BASE_URL=http://localhost:8070
+PDF_PARSER_TIMEOUT=30
 ```
 
 环境变量说明：
@@ -68,6 +73,91 @@ LLM_TEMPERATURE=0.2
 - `LLM_MODEL`：模型名称，例如 `deepseek-chat`
 - `LLM_TIMEOUT`：请求超时时间，默认 `60`
 - `LLM_TEMPERATURE`：采样温度，默认 `0.2`
+- `PDF_PARSER`：默认 `pymupdf`，可选 `pymupdf` / `grobid` / `docling` / `marker` / `mineru`
+- `GROBID_BASE_URL`：GROBID 服务地址，默认 `http://localhost:8070`
+- `PDF_PARSER_TIMEOUT`：parser 外部服务请求超时时间，默认 `30`
+
+## PDF Parser 架构
+
+当前 PDF 解析层已经拆成 parser adapter：
+
+```text
+app/services/parser_service.py
+app/services/parsers/
+  schema.py
+  base.py
+  pymupdf_parser.py
+  grobid_parser.py
+  docling_parser.py
+  marker_parser.py
+  mineru_parser.py
+```
+
+默认 parser 是 `PyMuPDF`：
+
+```env
+PDF_PARSER=pymupdf
+```
+
+`PyMuPDFParser` 已真实实现，会返回统一的 `ParsedPaper`，其中 `raw_text` 与旧流程兼容。后续章节抽取、方法分析、实验分析仍然读取 `raw_text`，所以现有 LangGraph 主流程不会被破坏。
+
+后端接口现在也支持 `paper_language`：
+
+- `paper_language=zh`：中文论文，强制请求 `PyMuPDF`
+- `paper_language=en`：英文论文，优先请求 `GROBID`
+- 旧请求不传 `paper_language` 时默认 `zh`
+- `PDF_PARSER` 仍是默认 parser 配置；但请求中传入 `paper_language` 后，`pdf_parse_node` 会按语言覆盖 parser 选择
+- 如果英文论文走 GROBID 失败、解析为空或质量太差，会 fallback 到 PyMuPDF，最终 `parser_name` 会显示真实使用的 parser
+
+可以通过 `.env` 切换 parser：
+
+```env
+PDF_PARSER=grobid
+GROBID_BASE_URL=http://localhost:8070
+PDF_PARSER_TIMEOUT=30
+```
+
+当前状态：
+
+- `pymupdf`：默认可用，真实抽取 PDF 文本
+- `grobid`：调用本地 GROBID `/api/processFulltextDocument`，解析 TEI XML 并返回 `ParsedPaper`
+- `docling` / `marker` / `mineru`：预留实验 adapter，依赖未安装或未接入时会安全失败
+
+如果非默认 parser 失败或返回空 `raw_text`，`parser_service` 会 fallback 到 `PyMuPDFParser`，保证单篇论文精读流程尽量继续运行。
+
+之所以仍保留 `raw_text`：当前章节抽取和 LLM 分析节点都依赖纯文本输入。新的 `ParsedPaper` 会同时写入 state 的 `parsed_paper`，方便后续比较 PyMuPDF / GROBID / Marker / MinerU / Docling 的结构化解析质量。
+
+### GROBID 使用说明
+
+启动 GROBID：
+
+```bash
+docker run -d --name grobid --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.0-crf
+```
+
+检查服务：
+
+```bash
+curl.exe http://localhost:8070/api/isalive
+```
+
+`.env` 配置：
+
+```env
+PDF_PARSER=grobid
+GROBID_BASE_URL=http://localhost:8070
+PDF_PARSER_TIMEOUT=30
+```
+
+GROBID parser 会上传 PDF 到：
+
+```text
+POST {GROBID_BASE_URL}/api/processFulltextDocument
+```
+
+并从返回的 TEI XML 中尽量提取 `title`、`authors`、`abstract`、`sections` 和 `raw_text`。如果 GROBID 服务不可用、超时、返回 204/400/500/503、XML 解析失败或抽取文本为空，系统会 fallback 到 PyMuPDF，并在 `parser_warnings` 中记录失败原因。
+
+对中文论文，如果 GROBID 没有把“引言”“材料与方法”“结果与分析”“讨论”“结论”等识别成 TEI `head`，GROBID parser 会从 body 的 `head/p` block 中使用中文标题规则做 `zh_heading_fallback`，结果放入 `ParsedPaper.sections`，调试信息放入 `parser_meta.section_titles` 和 `parser_meta.section_extraction_method`。
 
 ## mock 模式运行
 
@@ -89,6 +179,13 @@ uvicorn app.main:app --reload
 ```bash
 cd backend
 python scripts/run_analyze_paper.py --pdf path/to/paper.pdf
+```
+
+指定论文语言：
+
+```bash
+python scripts/run_analyze_paper.py --pdf path/to/paper.pdf --paper-language zh
+python scripts/run_analyze_paper.py --pdf path/to/paper.pdf --paper-language en
 ```
 
 ## 真实 LLM 模式运行
@@ -127,8 +224,8 @@ http://127.0.0.1:8000/docs
 
 调用顺序：
 
-1. `POST /api/papers/upload` 上传 PDF，得到 `paper_id`
-2. `POST /api/papers/{paper_id}/analyze` 生成精读笔记
+1. `POST /api/papers/upload` 上传 PDF，得到 `paper_id`，可传 multipart 字段 `paper_language=zh|en`
+2. `POST /api/papers/{paper_id}/analyze` 生成精读笔记，可传 query 参数 `paper_language=zh|en`
 3. `GET /api/papers/{paper_id}/note` 读取 Markdown 笔记
 
 健康检查：

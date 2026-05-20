@@ -10,6 +10,7 @@ from fastapi import UploadFile
 
 from app.core.config import (
     NOTES_DIR,
+    PAPER_METADATA_DIR,
     PAPER_SECTION_JSON_DIR,
     PAPERS_DIR,
     ensure_storage_dirs,
@@ -42,11 +43,43 @@ def _original_pdf_filename(pdf_path: str, paper_id: str) -> str:
     return filename
 
 
-def save_upload_pdf(file: UploadFile) -> dict[str, str]:
+def normalize_paper_language(paper_language: str | None) -> str:
+    """Normalize paper language without breaking old callers."""
+    value = (paper_language or "zh").strip().lower()
+    return value if value in {"zh", "en"} else "zh"
+
+
+def _paper_metadata_path(paper_id: str) -> Path:
+    """Return metadata path for an uploaded paper."""
+    return PAPER_METADATA_DIR / f"{paper_id}.json"
+
+
+def save_paper_metadata(paper_id: str, metadata: Mapping[str, Any]) -> None:
+    """Save lightweight paper metadata locally."""
+    ensure_storage_dirs()
+    _paper_metadata_path(paper_id).write_text(
+        json.dumps(dict(metadata), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def read_paper_metadata(paper_id: str) -> dict[str, Any]:
+    """Read lightweight paper metadata if present."""
+    path = _paper_metadata_path(paper_id)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_upload_pdf(file: UploadFile, paper_language: str = "zh") -> dict[str, str]:
     """Save an uploaded PDF into local paper storage."""
     ensure_storage_dirs()
     paper_id = generate_paper_id()
     filename = _safe_filename(file.filename or f"{paper_id}.pdf")
+    paper_language = normalize_paper_language(paper_language)
     target_path = PAPERS_DIR / f"{paper_id}_{filename}"
 
     """
@@ -56,10 +89,21 @@ def save_upload_pdf(file: UploadFile) -> dict[str, str]:
         while chunk := file.file.read(1024 * 1024):
             output.write(chunk)
 
+    save_paper_metadata(
+        paper_id,
+        {
+            "paper_id": paper_id,
+            "filename": filename,
+            "file_path": str(target_path),
+            "paper_language": paper_language,
+        },
+    )
+
     return {
         "paper_id": paper_id,
         "filename": filename,
         "file_path": str(target_path),
+        "paper_language": paper_language,
     }
 
 
