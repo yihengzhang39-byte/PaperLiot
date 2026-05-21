@@ -110,12 +110,21 @@ def get_paper_lookup_config() -> PaperLookupConfig:
         for provider in os.getenv("PAPER_LOOKUP_PROVIDERS", "arxiv,crossref,openalex").split(",")
         if provider.strip()
     ]
+    enabled = _get_bool_env(
+        "PAPER_INFO_TOOL_AGENT_ENABLED",
+        _get_bool_env("PAPER_INFO_WEB_ENRICH_ENABLED", True),
+    )
     return PaperLookupConfig(
-        enabled=_get_bool_env("PAPER_INFO_WEB_ENRICH_ENABLED", False),
+        enabled=enabled,
         timeout=_get_int_env("PAPER_LOOKUP_TIMEOUT", 10),
         max_results=_get_int_env("PAPER_LOOKUP_MAX_RESULTS", 5),
         providers=providers,
     )
+
+
+def is_paper_info_profile_enabled() -> bool:
+    """Return whether paper_info_node profiling is enabled."""
+    return _get_bool_env("PAPER_INFO_PROFILE_ENABLED", False)
 
 
 LLM_PROVIDER = get_llm_config().provider
@@ -129,10 +138,12 @@ PDF_PARSER = get_pdf_parser_config().parser
 GROBID_BASE_URL = get_pdf_parser_config().grobid_base_url
 PDF_PARSER_TIMEOUT = get_pdf_parser_config().timeout
 
-PAPER_INFO_WEB_ENRICH_ENABLED = get_paper_lookup_config().enabled
+PAPER_INFO_TOOL_AGENT_ENABLED = get_paper_lookup_config().enabled
+PAPER_INFO_WEB_ENRICH_ENABLED = PAPER_INFO_TOOL_AGENT_ENABLED
 PAPER_LOOKUP_TIMEOUT = get_paper_lookup_config().timeout
 PAPER_LOOKUP_MAX_RESULTS = get_paper_lookup_config().max_results
 PAPER_LOOKUP_PROVIDERS = get_paper_lookup_config().providers
+PAPER_INFO_PROFILE_ENABLED = is_paper_info_profile_enabled()
 
 
 """

@@ -189,7 +189,7 @@ def lookup_paper_metadata(
                 "crossref",
                 _invoke_tool(
                     search_crossref_paper,
-                    {"title": lookup_title, "first_author": first_author, "year": year},
+                    {"title": lookup_title, "first_author": first_author, "year": year, "doi": doi},
                 ),
             )
         if "openalex" in providers:
@@ -197,7 +197,7 @@ def lookup_paper_metadata(
                 "openalex",
                 _invoke_tool(
                     search_openalex_paper,
-                    {"title": lookup_title, "first_author": first_author, "year": year},
+                    {"title": lookup_title, "first_author": first_author, "year": year, "doi": doi},
                 ),
             )
         if paper_language == "en" and "arxiv" in providers and not arxiv_id:

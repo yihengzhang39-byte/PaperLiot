@@ -1,7 +1,7 @@
 """Paper metadata lookup tools.
 
 These functions are wrapped with @tool so they can be reused by future
-LLM-driven ToolNode workflows. The current workflow calls them manually.
+LLM-driven ToolNode workflows or the current paper_info_node tool agent.
 """
 
 from html import unescape
@@ -64,21 +64,34 @@ def _openalex_abstract(inverted_index: dict[str, list[int]] | None) -> str:
 
 
 @tool
-def search_crossref_paper(title: str, first_author: str = "", year: str = "") -> dict[str, object]:
+def search_crossref_paper(
+    title: str = "",
+    first_author: str = "",
+    year: str = "",
+    doi: str = "",
+) -> dict[str, object]:
     """Search Crossref for paper metadata candidates."""
     config = get_paper_lookup_config()
-    query = title or " ".join(part for part in [first_author, year] if part)
+    query = doi or title or " ".join(part for part in [first_author, year] if part)
     if not query:
         return _empty_result("crossref", query, "empty query")
 
     try:
-        response = requests.get(
-            "https://api.crossref.org/works",
-            params={"query.title": title or query, "rows": config.max_results},
-            timeout=config.timeout,
-        )
-        response.raise_for_status()
-        items = response.json().get("message", {}).get("items", [])
+        if doi:
+            response = requests.get(
+                f"https://api.crossref.org/works/{doi}",
+                timeout=config.timeout,
+            )
+            response.raise_for_status()
+            items = [response.json().get("message", {})]
+        else:
+            response = requests.get(
+                "https://api.crossref.org/works",
+                params={"query.title": title or query, "rows": config.max_results},
+                timeout=config.timeout,
+            )
+            response.raise_for_status()
+            items = response.json().get("message", {}).get("items", [])
         candidates = []
         for item in items[: config.max_results]:
             candidates.append(
@@ -100,17 +113,27 @@ def search_crossref_paper(title: str, first_author: str = "", year: str = "") ->
 
 
 @tool
-def search_openalex_paper(title: str, first_author: str = "", year: str = "") -> dict[str, object]:
+def search_openalex_paper(
+    title: str = "",
+    first_author: str = "",
+    year: str = "",
+    doi: str = "",
+) -> dict[str, object]:
     """Search OpenAlex for paper metadata candidates."""
     config = get_paper_lookup_config()
-    query = title or " ".join(part for part in [first_author, year] if part)
+    query = doi or title or " ".join(part for part in [first_author, year] if part)
     if not query:
         return _empty_result("openalex", query, "empty query")
 
     try:
+        params = {"per-page": config.max_results}
+        if doi:
+            params["filter"] = f"doi:{doi}"
+        else:
+            params["search"] = query
         response = requests.get(
             "https://api.openalex.org/works",
-            params={"search": query, "per-page": config.max_results},
+            params=params,
             timeout=config.timeout,
         )
         response.raise_for_status()
@@ -187,3 +210,4 @@ def search_arxiv_paper(title: str = "", arxiv_id: str = "") -> dict[str, object]
         return {"provider": "arxiv", "query": query, "candidates": candidates, "error": ""}
     except Exception as exc:
         return _empty_result("arxiv", query, str(exc))
+

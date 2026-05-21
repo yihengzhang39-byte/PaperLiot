@@ -22,6 +22,11 @@ class PaperAnalyzeResponse(BaseModel):
     model: str
     success: bool
     error_message: str
+    title: str = ""
+    authors: list[str] = Field(default_factory=list)
+    year: str = ""
+    venue: str = ""
+    abstract: str = ""
     section_meta: dict[str, dict[str, object]]
     paper_info_debug: dict[str, object] = Field(default_factory=dict)
     missing_info_fields: list[str] = Field(default_factory=list)

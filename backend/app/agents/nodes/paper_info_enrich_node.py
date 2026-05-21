@@ -1,4 +1,8 @@
-"""Paper metadata enrichment node using manual Agent tools."""
+"""Deprecated manual paper metadata enrichment node.
+
+This node is intentionally not connected to the LangGraph workflow. Paper
+metadata tool calling now lives in paper_info_node.
+"""
 
 from copy import deepcopy
 from typing import Any

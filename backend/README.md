@@ -65,6 +65,7 @@ LLM_TEMPERATURE=0.2
 PDF_PARSER=pymupdf
 GROBID_BASE_URL=http://localhost:8070
 PDF_PARSER_TIMEOUT=30
+PAPER_INFO_TOOL_AGENT_ENABLED=true
 PAPER_INFO_WEB_ENRICH_ENABLED=false
 PAPER_LOOKUP_TIMEOUT=10
 PAPER_LOOKUP_MAX_RESULTS=5
@@ -82,7 +83,8 @@ PAPER_LOOKUP_PROVIDERS=arxiv,crossref,openalex
 - `PDF_PARSER`：默认 `pymupdf`，可选 `pymupdf` / `grobid` / `docling` / `marker` / `mineru`
 - `GROBID_BASE_URL`：GROBID 服务地址，默认 `http://localhost:8070`
 - `PDF_PARSER_TIMEOUT`：parser 外部服务请求超时时间，默认 `30`
-- `PAPER_INFO_WEB_ENRICH_ENABLED`：是否启用论文元数据外部查询，默认 `false`
+- `PAPER_INFO_TOOL_AGENT_ENABLED`：是否启用 `paper_info_node` 的工具调用 Agent，默认 `true`
+- `PAPER_INFO_WEB_ENRICH_ENABLED`：旧配置兼容项，建议新项目使用 `PAPER_INFO_TOOL_AGENT_ENABLED`
 - `PAPER_LOOKUP_TIMEOUT`：论文元数据工具请求超时时间，默认 `10`
 - `PAPER_LOOKUP_MAX_RESULTS`：每个 provider 最大候选数量，默认 `5`
 - `PAPER_LOOKUP_PROVIDERS`：启用的 provider，默认 `arxiv,crossref,openalex`
@@ -139,21 +141,56 @@ PDF_PARSER_TIMEOUT=30
 
 ## 论文信息提取与外部补全
 
-`paper_info_node` 负责 PDF 内部信息提取，优先级是：
+`paper_info_node` 现在同时负责 PDF 内部信息提取和工具调用补全。英文论文优先级是：
 
 ```text
-parser / parser_meta -> LLM -> default
+parser / parser_meta -> tool-calling agent -> default
 ```
 
-它会输出 `paper_info_debug`，用于查看 `title/authors/year/venue/abstract` 每个字段来自 parser、parser_meta、LLM 还是默认值。
+中文论文优先级是：
 
-`paper_info_enrich_node` 位于 `paper_info_node` 之后，负责外部信息补全。当前采用“方案 A”：
+```text
+parser -> PyMuPDF 首页规则候选(parser_meta) -> first_page_llm -> default
+```
 
-- 工具函数用 `@tool` 封装，方便后续升级成 ToolNode + LLM 自主 tool calling
-- 当前不做 LLM 自主工具调用
-- 节点按规则手动调用工具
-- 工具只返回候选论文元数据，不直接修改 state
-- 节点只补缺失字段，不覆盖 parser 或 LLM 已明确提取的字段
+中文论文不再默认依赖 Crossref/OpenAlex/arXiv 补全基础元数据。PyMuPDF 会从第一页和摘要区域尽量抽取：
+
+- `candidate_title`
+- `candidate_title_confidence`
+- `candidate_title_candidates`
+- `candidate_authors`
+- `candidate_abstract`
+- `candidate_keywords`
+- `first_page_text`，最多 3000 字
+
+中文标题候选不再主要依赖 `raw_text` 的文本顺序，因为部分 PDF 的文本流开头可能就是摘要或页眉。`PyMuPDFParser` 会读取第一页 `page.get_text("dict")` 的视觉布局，基于 bbox、字号、页面上方位置、居中程度、中文比例、标题长度和多行合并生成最多 5 个候选，并写入 `candidate_title_candidates`。
+
+`paper_info_node` 使用中文标题候选时采用保守策略：
+
+- `candidate_title_confidence >= 0.75`：直接使用 layout 高置信候选，source 为 `parser_meta`
+- `candidate_title_confidence < 0.75`：不直接使用；如果真实 LLM 可用，只允许 LLM 从候选列表中选择，不能自由编写标题
+- LLM 认为候选不可靠或 mock 模式下无法确认时，title 保持 `未明确提及`
+
+如果中文论文仍缺 `authors/abstract`，可以用轻量 LLM 只读取首页文本做校正；不会把完整 `raw_text` 交给 LLM，也不会让它抽取 `title/year/venue`。中文论文的 `year/venue` 允许暂时缺失。
+
+LangGraph 中不再接入 `paper_info_enrich_node`，流程保持为：
+
+```text
+pdf_parse_node -> paper_info_node -> section_extract_node -> method_analyze_node -> experiment_analyze_node -> summary_write_node
+```
+
+工具函数仍用 `@tool` 封装，便于后续迁移到 LangGraph `ToolNode`。当前由 `paper_info_node` 内部执行 OpenAI-compatible tool calling，两阶段完成：第 1 次 LLM 决策工具，第 2 次 LLM 汇总 JSON，最多 2 次 LLM 调用。同一轮多个工具会并发执行。
+
+`paper_info_debug` 用于查看 `title/authors/year/venue/abstract` 每个字段来自 parser、parser_meta、first_page_llm、tool 还是默认值。`paper_info_debug["_zh_metadata"]` 会记录中文元数据候选、首页 LLM 使用情况和外部检索跳过原因。`paper_info_debug["_tool_agent"]` 会记录：
+
+- 是否启用工具 Agent
+- 是否真的调用了工具
+- 当前 LLM Provider 是否支持 tool calling
+- 缺失字段列表
+- 使用过的工具
+- 工具返回结果
+- 最终 Agent JSON
+- 错误信息
 
 可复用工具：
 
@@ -161,25 +198,27 @@ parser / parser_meta -> LLM -> default
 - `search_crossref_paper`
 - `search_openalex_paper`
 
-默认关闭外部查询：
+工具 Agent 配置：
 
 ```env
+PAPER_INFO_TOOL_AGENT_ENABLED=true
 PAPER_INFO_WEB_ENRICH_ENABLED=false
-```
-
-开启示例：
-
-```env
-PAPER_INFO_WEB_ENRICH_ENABLED=true
 PAPER_LOOKUP_PROVIDERS=arxiv,crossref,openalex
 ```
 
 触发规则：
 
-- 如果 `title/authors/year/venue` 任一缺失，则 `need_web_search=true`
-- 如果只缺 `abstract`，默认不触发外部查询
-- 开启外部查询后，只有候选 `confidence >= 0.75` 才允许补充缺失字段
+- 如果 `title/authors/year/venue/abstract` 都已由 parser/parser_meta 提供，`paper_info_node` 不调用 LLM 和工具
+- 英文论文存在缺失字段且工具 Agent 开启时，LLM 可自主调用 arXiv、Crossref、OpenAlex 工具
+- 中文论文无 DOI、arXiv ID、明确英文标题时，不调用 Crossref/OpenAlex/arXiv
+- 中文论文有 DOI 时可调用 Crossref/OpenAlex；有 arXiv ID 时才允许调用 arXiv
+- 工具只返回候选论文元数据，不直接修改 state
+- `paper_info_node` 只补缺失字段，不覆盖 parser/parser_meta 中已有明确值
+- 只有字段置信度 `confidence >= 0.75` 且基础校验通过，才允许使用工具结果
+- 如果当前 LLM Provider 是 `mock` 或不支持 tool calling，主流程不会崩溃，缺失字段会保持默认值，并在 debug 中记录 `tool_calling_supported=false`
 - analyze 响应中会返回 `missing_info_fields`、`need_web_search`、`web_search_debug` 和 `web_search_results`
+
+当前不使用 CNKI。如果后续需要中文外部元数据，建议接入机构或学校自己的合法元数据接口。
 
 ### GROBID 使用说明
 
@@ -292,8 +331,9 @@ curl http://127.0.0.1:8000/health
 
 当前 `section_extract_node` 使用“规则切分 + LLM 校正 + 可观测调试信息”：
 
-- 先通过常见标题规则切分 `Abstract`、`Introduction`、`Related Work/Background`、`Method`、`Experiments`、`Conclusion`
-- 支持大小写不敏感、阿拉伯数字编号和罗马数字编号，例如 `1 Introduction`、`2. Related Work`、`III. Methodology`
+- 先通过中英文双语标题规则切分 `Abstract/摘要`、`Introduction/引言`、`Related Work/相关工作`、`Method/材料与方法`、`Experiments/实验结果与分析`、`Conclusion/结论`
+- 支持英文大小写不敏感、阿拉伯数字编号、罗马数字编号、中文数字编号、章节编号和括号编号，例如 `1 Introduction`、`2. Related Work`、`III. Methodology`、`一、引言`、`第一章 绪论`、`（二）实验设计`
+- 中文摘要支持 `摘要：正文` / `摘 要：正文` 这类同一行格式，并以 `关键词`、`Abstract`、`引言` 等作为结束边界，避免把关键词或引言混入摘要
 - 规则抽取成功的章节优先保留
 - 如果 `method` 或 `experiments` 缺失，会调用当前配置的 LLM Provider 做章节归类兜底
 - 如果规则抽到的主要章节明显过短，会尝试用 LLM 做校正，但不会整体替换所有规则结果
@@ -308,9 +348,11 @@ curl http://127.0.0.1:8000/health
 {
   "source": "rule | llm | missing",
   "matched_title": "III. Methodology",
+  "normalized_section": "method",
   "length": 1234,
   "start_char": 5678,
   "end_char": 6912,
+  "confidence": 0.92,
   "warning": ""
 }
 ```
