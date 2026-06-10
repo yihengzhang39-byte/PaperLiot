@@ -52,6 +52,23 @@ class PaperLookupConfig:
     providers: list[str] | None = None
 
 
+@dataclass(frozen=True)
+class SectionRepairConfig:
+    """Runtime section repair configuration."""
+
+    llm_enabled: bool = False
+    max_rounds: int = 1
+
+
+@dataclass(frozen=True)
+class PlanAgentConfig:
+    """Runtime plan agent configuration."""
+
+    llm_enabled: bool = False
+    max_input_chars: int = 3000
+    confidence_threshold: float = 0.7
+
+
 def _get_int_env(name: str, default: int) -> int:
     """Read an integer environment variable with a safe default."""
     value = os.getenv(name, "").strip()
@@ -127,6 +144,23 @@ def is_paper_info_profile_enabled() -> bool:
     return _get_bool_env("PAPER_INFO_PROFILE_ENABLED", False)
 
 
+def get_section_repair_config() -> SectionRepairConfig:
+    """Read section repair configuration from environment variables."""
+    return SectionRepairConfig(
+        llm_enabled=_get_bool_env("SECTION_REPAIR_LLM_ENABLED", False),
+        max_rounds=_get_int_env("SECTION_REPAIR_MAX_ROUNDS", 1),
+    )
+
+
+def get_plan_agent_config() -> PlanAgentConfig:
+    """Read plan agent configuration from environment variables."""
+    return PlanAgentConfig(
+        llm_enabled=_get_bool_env("PLAN_AGENT_LLM_ENABLED", False),
+        max_input_chars=_get_int_env("PLAN_AGENT_MAX_INPUT_CHARS", 3000),
+        confidence_threshold=_get_float_env("PLAN_AGENT_CONFIDENCE_THRESHOLD", 0.7),
+    )
+
+
 LLM_PROVIDER = get_llm_config().provider
 LLM_API_KEY = get_llm_config().api_key
 LLM_BASE_URL = get_llm_config().base_url
@@ -144,6 +178,11 @@ PAPER_LOOKUP_TIMEOUT = get_paper_lookup_config().timeout
 PAPER_LOOKUP_MAX_RESULTS = get_paper_lookup_config().max_results
 PAPER_LOOKUP_PROVIDERS = get_paper_lookup_config().providers
 PAPER_INFO_PROFILE_ENABLED = is_paper_info_profile_enabled()
+SECTION_REPAIR_LLM_ENABLED = get_section_repair_config().llm_enabled
+SECTION_REPAIR_MAX_ROUNDS = get_section_repair_config().max_rounds
+PLAN_AGENT_LLM_ENABLED = get_plan_agent_config().llm_enabled
+PLAN_AGENT_MAX_INPUT_CHARS = get_plan_agent_config().max_input_chars
+PLAN_AGENT_CONFIDENCE_THRESHOLD = get_plan_agent_config().confidence_threshold
 
 
 """

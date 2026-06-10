@@ -27,7 +27,16 @@ class PaperAnalyzeResponse(BaseModel):
     year: str = ""
     venue: str = ""
     abstract: str = ""
+    analysis_plan: dict[str, object] = Field(default_factory=dict)
+    paper_type: str = ""
+    structure_type: str = ""
+    plan_debug: dict[str, object] = Field(default_factory=dict)
+    agent_decisions: list[dict[str, object]] = Field(default_factory=list)
     section_meta: dict[str, dict[str, object]]
+    section_quality: dict[str, object] = Field(default_factory=dict)
+    section_verify_debug: dict[str, object] = Field(default_factory=dict)
+    needs_section_repair: bool = False
+    section_repair_debug: dict[str, object] = Field(default_factory=dict)
     paper_info_debug: dict[str, object] = Field(default_factory=dict)
     missing_info_fields: list[str] = Field(default_factory=list)
     need_web_search: bool = False

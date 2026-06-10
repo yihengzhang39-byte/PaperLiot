@@ -19,6 +19,15 @@ class PaperState(TypedDict, total=False):
     requested_parser: str
     parser_meta: dict[str, Any]
 
+    # Agent 规划
+    analysis_plan: dict[str, object]
+    paper_type: str
+    structure_type: str
+    required_sections: list[str]
+    optional_sections: list[str]
+    plan_debug: dict[str, object]
+    agent_decisions: list[dict[str, object]]
+
     # 论文基础信息
     title: str
     authors: list[str]
@@ -38,6 +47,11 @@ class PaperState(TypedDict, total=False):
     experiments: str
     conclusion: str
     section_meta: dict[str, dict[str, object]]
+    section_quality: dict[str, object]
+    section_verify_debug: dict[str, object]
+    needs_section_repair: bool
+    section_repair_debug: dict[str, object]
+    section_repair_rounds: int
 
     # 分析结果
     problem: str

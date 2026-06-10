@@ -6,7 +6,10 @@ from app.agents.nodes.experiment_analyze_node import experiment_analyze_node
 from app.agents.nodes.method_analyze_node import method_analyze_node
 from app.agents.nodes.paper_info_node import paper_info_node
 from app.agents.nodes.pdf_parse_node import pdf_parse_node
+from app.agents.nodes.plan_agent_node import plan_agent_node
 from app.agents.nodes.section_extract_node import section_extract_node
+from app.agents.nodes.section_repair_node import section_repair_node
+from app.agents.nodes.section_verify_node import section_verify_node
 from app.agents.nodes.summary_write_node import summary_write_node
 from app.agents.paper_state import PaperState
 from app.services.file_service import save_paper_sections_json
@@ -17,16 +20,22 @@ def build_paper_graph():
     builder = StateGraph(PaperState)
 
     builder.add_node("pdf_parse_node", pdf_parse_node)
+    builder.add_node("plan_agent_node", plan_agent_node)
     builder.add_node("paper_info_node", paper_info_node)
     builder.add_node("section_extract_node", section_extract_node)
+    builder.add_node("section_verify_node", section_verify_node)
+    builder.add_node("section_repair_node", section_repair_node)
     builder.add_node("method_analyze_node", method_analyze_node)
     builder.add_node("experiment_analyze_node", experiment_analyze_node)
     builder.add_node("summary_write_node", summary_write_node)
 
     builder.add_edge(START, "pdf_parse_node")
-    builder.add_edge("pdf_parse_node", "paper_info_node")
+    builder.add_edge("pdf_parse_node", "plan_agent_node")
+    builder.add_edge("plan_agent_node", "paper_info_node")
     builder.add_edge("paper_info_node", "section_extract_node")
-    builder.add_edge("section_extract_node", "method_analyze_node")
+    builder.add_edge("section_extract_node", "section_verify_node")
+    builder.add_edge("section_verify_node", "section_repair_node")
+    builder.add_edge("section_repair_node", "method_analyze_node")
     builder.add_edge("method_analyze_node", "experiment_analyze_node")
     builder.add_edge("experiment_analyze_node", "summary_write_node")
     builder.add_edge("summary_write_node", END)
@@ -46,6 +55,13 @@ def _initial_state(pdf_path: str, paper_id: str, paper_language: str = "zh") -> 
         "parser_warnings": [],
         "requested_parser": "",
         "parser_meta": {},
+        "analysis_plan": {},
+        "paper_type": "",
+        "structure_type": "",
+        "required_sections": [],
+        "optional_sections": [],
+        "plan_debug": {},
+        "agent_decisions": [],
         "title": "",
         "authors": [],
         "year": "",
@@ -62,6 +78,11 @@ def _initial_state(pdf_path: str, paper_id: str, paper_language: str = "zh") -> 
         "experiments": "",
         "conclusion": "",
         "section_meta": {},
+        "section_quality": {},
+        "section_verify_debug": {},
+        "needs_section_repair": False,
+        "section_repair_debug": {},
+        "section_repair_rounds": 0,
         "problem": "",
         "motivation": "",
         "method_summary": "",

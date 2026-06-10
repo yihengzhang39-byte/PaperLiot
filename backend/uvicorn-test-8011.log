@@ -1,3 +1,0 @@
-INFO:     127.0.0.1:65274 - "GET /health HTTP/1.1" 200 OK
-INFO:     127.0.0.1:65276 - "POST /api/papers/upload HTTP/1.1" 200 OK
-INFO:     127.0.0.1:65280 - "POST /api/papers/c32dd83f6a4d409faf60b1d987a9d249/analyze?paper_language=en HTTP/1.1" 200 OK

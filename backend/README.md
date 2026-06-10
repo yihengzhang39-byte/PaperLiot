@@ -70,6 +70,11 @@ PAPER_INFO_WEB_ENRICH_ENABLED=false
 PAPER_LOOKUP_TIMEOUT=10
 PAPER_LOOKUP_MAX_RESULTS=5
 PAPER_LOOKUP_PROVIDERS=arxiv,crossref,openalex
+SECTION_REPAIR_LLM_ENABLED=false
+SECTION_REPAIR_MAX_ROUNDS=1
+PLAN_AGENT_LLM_ENABLED=false
+PLAN_AGENT_MAX_INPUT_CHARS=3000
+PLAN_AGENT_CONFIDENCE_THRESHOLD=0.7
 ```
 
 环境变量说明：
@@ -88,6 +93,11 @@ PAPER_LOOKUP_PROVIDERS=arxiv,crossref,openalex
 - `PAPER_LOOKUP_TIMEOUT`：论文元数据工具请求超时时间，默认 `10`
 - `PAPER_LOOKUP_MAX_RESULTS`：每个 provider 最大候选数量，默认 `5`
 - `PAPER_LOOKUP_PROVIDERS`：启用的 provider，默认 `arxiv,crossref,openalex`
+- `SECTION_REPAIR_LLM_ENABLED`：章节修复是否允许调用 LLM，默认 `false`
+- `SECTION_REPAIR_MAX_ROUNDS`：章节修复最大轮次，当前第一版默认 `1`
+- `PLAN_AGENT_LLM_ENABLED`：是否启用受控 LLM planner，默认 `false`
+- `PLAN_AGENT_MAX_INPUT_CHARS`：`plan_agent_node` 发送给 LLM 的 `raw_text_preview` 最大长度，默认 `3000`
+- `PLAN_AGENT_CONFIDENCE_THRESHOLD`：LLM plan 被采纳的最低置信度，默认 `0.7`
 
 ## PDF Parser 架构
 
@@ -176,8 +186,47 @@ parser -> PyMuPDF 首页规则候选(parser_meta) -> first_page_llm -> default
 LangGraph 中不再接入 `paper_info_enrich_node`，流程保持为：
 
 ```text
-pdf_parse_node -> paper_info_node -> section_extract_node -> method_analyze_node -> experiment_analyze_node -> summary_write_node
+pdf_parse_node -> plan_agent_node -> paper_info_node -> section_extract_node -> section_verify_node -> section_repair_node -> method_analyze_node -> experiment_analyze_node -> summary_write_node
 ```
+
+## Plan Agent
+
+`plan_agent_node` 是策略规划 Agent。它位于 `pdf_parse_node` 之后、`paper_info_node` 之前，只生成 `analysis_plan`，不控制 graph 路由。
+
+当前采用 “Rule as evidence, LLM as planner, Code as guardrail”：
+
+- 规则先提取受控证据 `evidence`，并生成 `rule_plan`
+- 默认 `PLAN_AGENT_LLM_ENABLED=false`，只使用规则计划，不增加耗时
+- 开启 LLM planner 后，只把 `evidence` 和 `rule_plan` 发给 LLM
+- 不会把完整 `raw_text` 发给 LLM，只会发送最多 `PLAN_AGENT_MAX_INPUT_CHARS` 字的 `raw_text_preview`
+- LLM 不能调用工具，不能输出代码，不能决定或改变 LangGraph 路由
+- LLM 输出的 `llm_plan` 会经过代码校验；低置信、非法字段、非法 JSON 或安全策略冲突都会 fallback 到 `rule_plan`
+
+它会基于受控证据判断：
+
+- `paper_type`：`algorithm_paper` / `experimental_research` / `engineering_system` / `review` / `thesis_or_report` / `generic_research`
+- `structure_type`
+- `required_sections`
+- `optional_sections`
+- `metadata_strategy`
+- `section_strategy`
+- `repair_strategy`
+- `document_size_strategy`
+- `analysis_focus`
+- `risks`
+
+当前 `analysis_plan` 只是策略建议，后续 `section_verify_node`、`section_repair_node`、RAG 或条件边可以逐步读取它。API 响应会返回 `analysis_plan`、`paper_type`、`structure_type`、`plan_debug` 和 `agent_decisions`，方便观察规划结果。
+
+`plan_debug` 会记录：
+
+- `planner_mode`：`rule_only` / `llm_accepted` / `llm_rejected` / `llm_failed`
+- `rule_plan`
+- `llm_plan`
+- `validated_plan`
+- `validation_warnings`
+- `evidence_summary`
+
+中文论文如果没有 DOI、arXiv ID 或明确英文标题，即使 LLM planner 建议 external lookup，代码校验也会强制 `metadata_strategy.use_external_lookup=false`。大 PDF 只会在计划里标记 `use_chunking/use_rag=true`，本轮不会真正执行 RAG。
 
 工具函数仍用 `@tool` 封装，便于后续迁移到 LangGraph `ToolNode`。当前由 `paper_info_node` 内部执行 OpenAI-compatible tool calling，两阶段完成：第 1 次 LLM 决策工具，第 2 次 LLM 汇总 JSON，最多 2 次 LLM 调用。同一轮多个工具会并发执行。
 
@@ -214,7 +263,11 @@ PAPER_LOOKUP_PROVIDERS=arxiv,crossref,openalex
 - 中文论文有 DOI 时可调用 Crossref/OpenAlex；有 arXiv ID 时才允许调用 arXiv
 - 工具只返回候选论文元数据，不直接修改 state
 - `paper_info_node` 只补缺失字段，不覆盖 parser/parser_meta 中已有明确值
+- 外部工具返回多个候选后，会先做本地 rerank，不完全依赖 Crossref/OpenAlex/arXiv 的原始排序
+- 本地 rerank 会综合 `title_similarity`、`author_match_score`、`year_match`、`venue_match_score`、`doi_match`、`arxiv_match` 得到 `local_match_score`
+- 如果 provider 第二个候选更像目标论文，它可以被提升为 `local_rank=1`
 - 只有字段置信度 `confidence >= 0.75` 且基础校验通过，才允许使用工具结果
+- `paper_info_debug["_tool_agent"]` 会记录 `candidate_rank_before`、`candidate_rank_after`、`selected_candidate`、`top_candidates_after_rerank` 和 `local_match_score`
 - 如果当前 LLM Provider 是 `mock` 或不支持 tool calling，主流程不会崩溃，缺失字段会保持默认值，并在 debug 中记录 `tool_calling_supported=false`
 - analyze 响应中会返回 `missing_info_fields`、`need_web_search`、`web_search_debug` 和 `web_search_results`
 
@@ -329,7 +382,13 @@ curl http://127.0.0.1:8000/health
 
 ## 章节抽取策略与调试
 
-当前 `section_extract_node` 使用“规则切分 + LLM 校正 + 可观测调试信息”：
+当前章节抽取链路已经升级为一个低风险的 `extract -> verify -> repair` 子系统：
+
+```text
+section_extract_node -> section_verify_node -> section_repair_node -> method_analyze_node
+```
+
+`section_extract_node` 负责初始规则切分和保留原有 LLM 兜底逻辑：
 
 - 先通过中英文双语标题规则切分 `Abstract/摘要`、`Introduction/引言`、`Related Work/相关工作`、`Method/材料与方法`、`Experiments/实验结果与分析`、`Conclusion/结论`
 - 支持英文大小写不敏感、阿拉伯数字编号、罗马数字编号、中文数字编号、章节编号和括号编号，例如 `1 Introduction`、`2. Related Work`、`III. Methodology`、`一、引言`、`第一章 绪论`、`（二）实验设计`
@@ -341,6 +400,22 @@ curl http://127.0.0.1:8000/health
 - 兜底时最多传入论文前 40000 字，要求模型只复制原文章节内容，不总结、不改写
 - LLM 兜底失败时会安全降级，保留规则结果并在 `section_meta` 中记录 warning
 - `References` 及其之后的内容不会放入 `conclusion`
+
+`section_verify_node` 不调用 LLM，只做规则质量检查：
+
+- 判断 `abstract/introduction/related_work/method/experiments/conclusion` 是否缺失或过短
+- 检查 `abstract` 是否混入关键词或引言
+- 检查 `method/experiments/conclusion` 是否被 `References/参考文献` 污染
+- 检查 `method` 和 `experiments` 是否可能混淆或重复
+- 输出 `section_quality`、`section_verify_debug` 和 `needs_section_repair`
+
+`section_repair_node` 第一版固定接入，但内部可跳过：
+
+- 如果 `needs_section_repair=false`，直接 passthrough，不改变章节内容
+- 如果需要修复，默认只做一次规则修复
+- 可截断参考文献污染，重新提取摘要边界，或从 `raw_text` 中复制规则命中的 `method/experiments/conclusion`
+- 修复后会重新计算 `section_quality`
+- LLM repair 只预留配置，默认关闭，不增加额外耗时
 
 章节节点会在 state 中额外写入 `section_meta`，每个章节包含：
 
@@ -371,6 +446,7 @@ API 调试方式：
 1. 在 Swagger 中调用 `POST /api/papers/upload` 上传 PDF
 2. 调用 `POST /api/papers/{paper_id}/analyze`
 3. 响应中的 `section_meta` 字段会返回每个章节的 `source`、`matched_title`、`length`、`start_char`、`end_char` 和 `warning`
+4. 响应中的 `section_quality`、`section_verify_debug`、`needs_section_repair`、`section_repair_debug` 可用于查看章节自检和修复过程
 
 示例：
 

@@ -247,6 +247,160 @@ def _is_tool_value_usable(
     return True
 
 
+def _normalize_match_text(text: object) -> str:
+    """Normalize title/venue text for local candidate matching."""
+    normalized = str(text or "").lower()
+    normalized = normalized.replace("：", ":").replace("\n", " ")
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"\s*:\s*", ": ", normalized)
+    normalized = normalized.replace("16x16", "16x16")
+    normalized = re.sub(r"[\"'“”‘’`]+", "", normalized)
+    normalized = re.sub(r"[\s\.,;:，。；：!\?？!]+$", "", normalized)
+    return normalized.strip()
+
+
+def _normalize_doi(value: object) -> str:
+    """Normalize DOI strings for exact matching."""
+    return str(value or "").strip().lower().replace("https://doi.org/", "").replace("http://doi.org/", "")
+
+
+def _normalize_arxiv(value: object) -> str:
+    """Extract and normalize an arXiv id from a string."""
+    text = str(value or "").strip()
+    return _extract_arxiv_id(text).lower()
+
+
+def _author_match_score(parser_authors: list[str], candidate_authors: object) -> float:
+    """Score author overlap, emphasizing first-author match."""
+    parser_list = [_normalize_match_text(author) for author in parser_authors if str(author).strip()]
+    candidate_list = [_normalize_match_text(author) for author in _normalize_authors(candidate_authors)]
+    if not parser_list or not candidate_list:
+        return 0.0
+
+    first_score = 0.0
+    if parser_list[0] == candidate_list[0] or _similarity(parser_list[0], candidate_list[0]) >= 0.82:
+        first_score = 0.6
+
+    parser_set = set(parser_list)
+    candidate_set = set(candidate_list)
+    exact_overlap = len(parser_set & candidate_set) / max(len(parser_set), 1)
+    fuzzy_hits = 0
+    for parser_author in parser_list:
+        if any(_similarity(parser_author, candidate_author) >= 0.82 for candidate_author in candidate_list):
+            fuzzy_hits += 1
+    fuzzy_overlap = fuzzy_hits / max(len(parser_list), 1)
+    return round(min(1.0, first_score + max(exact_overlap, fuzzy_overlap) * 0.4), 4)
+
+
+def _venue_match_score(parser_venue: object, candidate_venue: object) -> float:
+    """Score venue similarity when parser venue exists."""
+    parser_text = _normalize_match_text(parser_venue)
+    candidate_text = _normalize_match_text(candidate_venue)
+    if not parser_text or not candidate_text:
+        return 0.0
+    if parser_text == candidate_text:
+        return 1.0
+    if parser_text in candidate_text or candidate_text in parser_text:
+        return 0.85
+    return round(_similarity(parser_text, candidate_text), 4)
+
+
+def _candidate_rerank_reason(candidate: dict[str, object]) -> str:
+    """Build a concise explanation for local candidate score."""
+    reasons = []
+    if candidate.get("doi_match"):
+        reasons.append("doi_match")
+    if candidate.get("arxiv_match"):
+        reasons.append("arxiv_match")
+    if float(candidate.get("title_similarity", 0.0) or 0.0) >= 0.9:
+        reasons.append(f"title_similarity={candidate.get('title_similarity')}")
+    if float(candidate.get("author_match_score", 0.0) or 0.0) >= 0.6:
+        reasons.append(f"author_match_score={candidate.get('author_match_score')}")
+    if candidate.get("year_match"):
+        reasons.append("year_match")
+    if float(candidate.get("venue_match_score", 0.0) or 0.0) >= 0.8:
+        reasons.append(f"venue_match_score={candidate.get('venue_match_score')}")
+    return ", ".join(reasons) if reasons else "weak local match"
+
+
+def rerank_metadata_candidates(
+    candidates: list[dict],
+    parser_title: str,
+    parser_authors: list[str],
+    parser_year: str | None,
+    parser_venue: str | None,
+    doi: str | None = None,
+    arxiv_id: str | None = None,
+) -> list[dict]:
+    """Rerank metadata candidates across providers with local matching signals."""
+    provider_counts: dict[str, int] = {}
+    normalized_parser_title = _normalize_match_text(parser_title)
+    normalized_doi = _normalize_doi(doi)
+    normalized_arxiv = _normalize_arxiv(arxiv_id)
+    reranked: list[dict] = []
+
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source", "") or candidate.get("provider", "") or "unknown")
+        provider_counts[source] = provider_counts.get(source, 0) + 1
+        provider_rank = provider_counts[source]
+        candidate_title = _normalize_match_text(candidate.get("title", ""))
+        title_similarity = round(_similarity(normalized_parser_title, candidate_title), 4) if normalized_parser_title and candidate_title else 0.0
+        author_score = _author_match_score(parser_authors, candidate.get("authors", []))
+        year_match = bool(parser_year and str(candidate.get("year", "")).strip() == str(parser_year).strip())
+        venue_score = _venue_match_score(parser_venue, candidate.get("venue", ""))
+        candidate_doi = _normalize_doi(candidate.get("doi", ""))
+        candidate_arxiv = _normalize_arxiv(" ".join([str(candidate.get("url", "")), str(candidate.get("doi", "")), str(candidate.get("title", ""))]))
+        doi_match = bool(normalized_doi and candidate_doi and normalized_doi == candidate_doi)
+        arxiv_match = bool(normalized_arxiv and candidate_arxiv and normalized_arxiv == candidate_arxiv)
+
+        score = 0.0
+        if doi_match:
+            score = max(score, 0.98)
+        if arxiv_match:
+            score = max(score, 0.97)
+        score = max(
+            score,
+            title_similarity * 0.62
+            + author_score * 0.23
+            + (0.08 if year_match else 0.0)
+            + min(venue_score, 1.0) * 0.07,
+        )
+        if title_similarity >= 0.96 and author_score >= 0.5:
+            score = max(score, 0.88)
+        if title_similarity >= 0.98 and (candidate.get("year") or candidate.get("venue")):
+            score = max(score, 0.82)
+
+        enriched = {
+            **candidate,
+            "provider_rank": provider_rank,
+            "provider_global_rank": index + 1,
+            "local_match_score": round(min(1.0, score), 4),
+            "title_similarity": title_similarity,
+            "author_match_score": author_score,
+            "year_match": year_match,
+            "venue_match_score": venue_score,
+            "doi_match": doi_match,
+            "arxiv_match": arxiv_match,
+        }
+        enriched["rerank_reason"] = _candidate_rerank_reason(enriched)
+        reranked.append(enriched)
+
+    reranked.sort(
+        key=lambda item: (
+            float(item.get("local_match_score", 0.0) or 0.0),
+            float(item.get("title_similarity", 0.0) or 0.0),
+            float(item.get("author_match_score", 0.0) or 0.0),
+            -int(item.get("provider_rank", 999) or 999),
+        ),
+        reverse=True,
+    )
+    for local_rank, candidate in enumerate(reranked, start=1):
+        candidate["local_rank"] = local_rank
+    return reranked
+
+
 def _base_field_debug(
     field_name: str,
     final_value: object,
@@ -853,6 +1007,16 @@ def _slim_tool_result_for_llm(result: dict[str, object], missing_fields: list[st
             "url": candidate.get("url", ""),
             "source": candidate.get("source", ""),
             "confidence": candidate.get("confidence", 0.0),
+            "provider_rank": candidate.get("provider_rank", ""),
+            "local_rank": candidate.get("local_rank", ""),
+            "local_match_score": candidate.get("local_match_score", 0.0),
+            "title_similarity": candidate.get("title_similarity", 0.0),
+            "author_match_score": candidate.get("author_match_score", 0.0),
+            "year_match": candidate.get("year_match", False),
+            "venue_match_score": candidate.get("venue_match_score", 0.0),
+            "doi_match": candidate.get("doi_match", False),
+            "arxiv_match": candidate.get("arxiv_match", False),
+            "rerank_reason": candidate.get("rerank_reason", ""),
         }
         if include_abstract:
             slim_candidate["abstract"] = str(candidate.get("abstract", "") or "")[:500]
@@ -878,6 +1042,69 @@ def _parse_agent_json(content: str) -> dict[str, object]:
             cleaned = cleaned[start : end + 1]
     parsed = json.loads(cleaned)
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _candidate_debug_view(candidate: dict[str, object] | None) -> dict[str, object]:
+    """Return a compact candidate view for debug/API output."""
+    if not candidate:
+        return {}
+    return {
+        "title": candidate.get("title", ""),
+        "authors": candidate.get("authors", []),
+        "year": candidate.get("year", ""),
+        "venue": candidate.get("venue", ""),
+        "doi": candidate.get("doi", ""),
+        "url": candidate.get("url", ""),
+        "source": candidate.get("source", ""),
+        "provider_rank": candidate.get("provider_rank", ""),
+        "local_rank": candidate.get("local_rank", ""),
+        "local_match_score": candidate.get("local_match_score", 0.0),
+        "title_similarity": candidate.get("title_similarity", 0.0),
+        "author_match_score": candidate.get("author_match_score", 0.0),
+        "year_match": candidate.get("year_match", False),
+        "venue_match_score": candidate.get("venue_match_score", 0.0),
+        "doi_match": candidate.get("doi_match", False),
+        "arxiv_match": candidate.get("arxiv_match", False),
+        "rerank_reason": candidate.get("rerank_reason", ""),
+    }
+
+
+def _augment_agent_json_with_selected_candidate(
+    agent_json: dict[str, object],
+    selected_candidate: dict[str, object] | None,
+    missing_fields: list[str],
+) -> dict[str, object]:
+    """Use a high-confidence reranked candidate as conservative fallback for missing fields."""
+    if not selected_candidate:
+        return agent_json
+    score = float(selected_candidate.get("local_match_score", 0.0) or 0.0)
+    if score < CONFIDENCE_THRESHOLD:
+        return agent_json
+
+    augmented = dict(agent_json or {})
+    confidence = augmented.get("confidence", {}) if isinstance(augmented.get("confidence"), dict) else {}
+    field_sources = augmented.get("field_sources", {}) if isinstance(augmented.get("field_sources"), dict) else {}
+    for field in missing_fields:
+        if field not in {"title", "authors", "year", "venue", "abstract"}:
+            continue
+        if _is_clear_value(augmented.get(field), field) and field_sources.get(field) == "tool":
+            continue
+        value = selected_candidate.get(field)
+        if _is_clear_value(value, field):
+            augmented[field] = _normalize_authors(value) if field == "authors" else str(value)
+            confidence[field] = max(float(confidence.get(field, 0.0) or 0.0), score)
+            field_sources[field] = "tool"
+
+    augmented["confidence"] = confidence
+    augmented["field_sources"] = field_sources
+    if selected_candidate:
+        reason = str(augmented.get("reason", "") or "")
+        selected_reason = (
+            f"Selected {selected_candidate.get('source', '')} candidate local_rank={selected_candidate.get('local_rank')} "
+            f"with local_match_score={selected_candidate.get('local_match_score')}."
+        )
+        augmented["reason"] = f"{reason} {selected_reason}".strip()
+    return augmented
 
 
 def _tool_calling_supported() -> tuple[bool, str]:
@@ -954,6 +1181,15 @@ def _run_tool_agent(
         "raw_text_preview_length": min(len(state.get("raw_text", "")), 2000),
         "parser_name": state.get("parser_name", ""),
         "paper_language": state.get("paper_language", "zh"),
+        "candidate_rerank_enabled": True,
+        "candidate_rank_before": None,
+        "candidate_rank_after": None,
+        "selected_candidate": {},
+        "top_candidates_after_rerank": [],
+        "local_match_score": 0.0,
+        "title_similarity": 0.0,
+        "author_match_score": 0.0,
+        "selected_reason": "",
     }
     if not supported:
         tool_debug["reason"] = unsupported_reason
@@ -1105,7 +1341,42 @@ def _run_tool_agent(
                 "content": json.dumps(_slim_tool_result_for_llm(result, missing_fields), ensure_ascii=False),
             }
         )
+
+    reranked_candidates = rerank_metadata_candidates(
+        candidates,
+        str(final_info.get("title", "") if _is_clear_value(final_info.get("title"), "title") else parsed_info.get("title", "") or ""),
+        _normalize_authors(final_info.get("authors") or parsed_info.get("authors") or []),
+        str(parsed_info.get("year", "") or final_info.get("year", "") or ""),
+        str(parsed_info.get("venue", "") or final_info.get("venue", "") or ""),
+        str(lookup_hints.get("doi", "") or ""),
+        str(lookup_hints.get("arxiv_id", "") or ""),
+    )
+    selected_candidate = reranked_candidates[0] if reranked_candidates else {}
+    top_candidates_debug = [_candidate_debug_view(candidate) for candidate in reranked_candidates[:5]]
+    tool_debug["top_candidates_after_rerank"] = top_candidates_debug
+    tool_debug["selected_candidate"] = _candidate_debug_view(selected_candidate)
+    if selected_candidate:
+        tool_debug["candidate_rank_before"] = selected_candidate.get("provider_rank")
+        tool_debug["candidate_rank_after"] = selected_candidate.get("local_rank")
+        tool_debug["local_match_score"] = selected_candidate.get("local_match_score", 0.0)
+        tool_debug["title_similarity"] = selected_candidate.get("title_similarity", 0.0)
+        tool_debug["author_match_score"] = selected_candidate.get("author_match_score", 0.0)
+        tool_debug["selected_reason"] = selected_candidate.get("rerank_reason", "")
+        if float(selected_candidate.get("local_match_score", 0.0) or 0.0) < 0.6:
+            tool_debug["low_confidence_candidate_rejected"] = True
+            tool_debug["low_confidence_reason"] = "Top local_match_score is below 0.60"
+    candidates = reranked_candidates
     messages.extend(slim_tool_messages)
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "下面是工具候选的本地重排结果。provider_rank 是原 provider 内排序，local_rank 是 PaperPilot 本地重排后的排序。"
+                "优先参考 local_rank=1 且 local_match_score>=0.75 的候选；0.60 到 0.75 只能作为弱参考；低于 0.60 不要用于补字段。"
+                f"{json.dumps({'top_candidates_after_rerank': top_candidates_debug, 'missing_fields': missing_fields}, ensure_ascii=False)}"
+            ),
+        }
+    )
     messages.append(
         {
             "role": "user",
@@ -1113,7 +1384,9 @@ def _run_tool_agent(
                 "工具调用已经结束，不允许继续调用工具。"
                 "请只根据 parser 信息、missing_fields 和上面的工具结果输出最终 JSON。"
                 "只补充 missing_fields 中的字段，不覆盖 parser/parser_meta 已有明确值。"
+                "不在 missing_fields 中的 title/authors/abstract/year/venue 必须返回空字符串或空数组，不要复述 parser 已有字段。"
                 "工具结果不可信或信息不足时返回默认值。不要翻译摘要。"
+                "reason 中说明 selected candidate 的 provider、local_rank 和 local_match_score。"
                 "最终只能输出 JSON，不要 Markdown，不要解释。"
             ),
         }
@@ -1164,6 +1437,7 @@ def _run_tool_agent(
         final_agent_json = _parse_agent_json(str(message.get("content", "") or "{}"))
     except Exception as exc:
         tool_debug["errors"].append(f"Failed to parse final agent JSON: {exc}")
+    final_agent_json = _augment_agent_json_with_selected_candidate(final_agent_json, selected_candidate, missing_fields)
     if profile is not None:
         profile["final_json_parse_sec"] = round(
             float(profile.get("final_json_parse_sec", 0.0)) + _duration_sec(parse_start),
@@ -1180,11 +1454,17 @@ def _merge_tool_agent_result(
     field_debug: dict[str, object],
     agent_json: dict[str, object],
     parser_title: str,
+    missing_fields: list[str],
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Fill missing fields from the tool agent JSON without overwriting clear values."""
     confidence = agent_json.get("confidence", {}) if isinstance(agent_json.get("confidence"), dict) else {}
     field_sources = agent_json.get("field_sources", {}) if isinstance(agent_json.get("field_sources"), dict) else {}
+    allowed_fields = set(missing_fields)
     for field in ["title", "authors", "year", "venue", "abstract"]:
+        if field not in allowed_fields:
+            field_debug[field]["tool_checked"] = True
+            field_debug[field]["tool_not_used_reason"] = "Field was not in missing_fields; tool result ignored"
+            continue
         if _is_clear_value(final_info.get(field), field):
             field_debug[field]["tool_checked"] = True
             field_debug[field]["tool_not_used_reason"] = "Existing parser/parser_meta value is clear; tool result not used"
@@ -1202,7 +1482,8 @@ def _merge_tool_agent_result(
                 "confidence": field_confidence,
                 "used_tool": True,
                 "used_default": False,
-                "reason": "parser/parser_meta 未提取到该字段，工具 Agent 命中高置信结果，因此使用工具结果",
+                "tool_value_clear": _is_clear_value(tool_value, field),
+                "reason": "parser/parser_meta 未提取到该字段，工具 Agent 或本地 rerank 命中高置信结果，因此使用工具结果",
             }
         else:
             field_debug[field]["tool_checked"] = True
@@ -1354,6 +1635,7 @@ def paper_info_node(state: PaperState) -> dict[str, object]:
             field_debug,
             agent_result.get("agent_json", {}) or {},
             str(parsed_info.get("title", "") or ""),
+            missing_fields,
         )
         if profile_enabled:
             profile["field_merge_sec"] = _duration_sec(merge_start)

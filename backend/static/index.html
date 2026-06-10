@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PaperPilot Chat</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <style>
+    .markdown-body h1 { font-size: 1.55rem; line-height: 2rem; font-weight: 700; margin: 1rem 0 .75rem; color: #111827; }
+    .markdown-body h2 { font-size: 1.28rem; line-height: 1.8rem; font-weight: 700; margin: 1rem 0 .65rem; color: #1f2937; }
+    .markdown-body h3 { font-size: 1.08rem; line-height: 1.55rem; font-weight: 650; margin: .85rem 0 .5rem; color: #374151; }
+    .markdown-body p { margin: .62rem 0; line-height: 1.75; }
+    .markdown-body ul, .markdown-body ol { margin: .62rem 0 .62rem 1.25rem; line-height: 1.75; }
+    .markdown-body ul { list-style: disc; }
+    .markdown-body ol { list-style: decimal; }
+    .markdown-body blockquote { border-left: 4px solid #93c5fd; padding: .25rem .9rem; margin: .8rem 0; background: #eff6ff; color: #334155; }
+    .markdown-body code:not(pre code) { background: #eff6ff; color: #1d4ed8; padding: .08rem .32rem; border-radius: .3rem; font-size: .9em; }
+    .markdown-body pre { margin: .85rem 0; border-radius: .65rem; overflow: auto; border: 1px solid #dbeafe; }
+    .markdown-body table { width: 100%; border-collapse: collapse; margin: .85rem 0; font-size: .92rem; }
+    .markdown-body th, .markdown-body td { border: 1px solid #dbeafe; padding: .5rem .65rem; text-align: left; }
+    .markdown-body th { background: #eff6ff; color: #1e3a8a; }
+    .chat-scrollbar::-webkit-scrollbar { width: 8px; }
+    .chat-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+  </style>
+</head>
+<body class="h-screen overflow-hidden bg-white text-slate-900">
+  <div class="flex h-screen">
+    <aside id="sidebar" class="hidden w-[260px] shrink-0 flex-col bg-[#202123] text-slate-100 md:flex">
+      <div class="border-b border-white/10 p-3">
+        <div class="mb-3 flex items-center gap-2 px-1">
+          <div class="flex h-8 w-8 items-center justify-center rounded-md bg-blue-600 text-sm font-bold">P</div>
+          <div>
+            <div class="text-sm font-semibold">PaperPilot</div>
+            <div class="text-xs text-slate-400">论文精读助手</div>
+          </div>
+        </div>
+        <button id="newChatButton" type="button" class="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-white/20 px-3 text-sm font-medium transition hover:bg-white/10">
+          <span class="text-lg leading-none">+</span>
+          新建对话
+        </button>
+      </div>
+
+      <nav id="conversationList" class="chat-scrollbar flex-1 space-y-1 overflow-y-auto p-2"></nav>
+
+      <div class="border-t border-white/10 p-3">
+        <label class="mb-2 block text-xs text-slate-400" for="paperLanguage">论文语言</label>
+        <select id="paperLanguage" class="mb-3 h-9 w-full rounded-md border border-white/10 bg-[#2a2b32] px-2 text-sm text-slate-100 outline-none focus:border-blue-500">
+          <option value="zh">中文</option>
+          <option value="en">英文</option>
+        </select>
+        <button type="button" class="flex h-10 w-full items-center justify-start gap-2 rounded-md px-3 text-sm text-slate-300 hover:bg-white/10">
+          <span>⚙️</span>
+          设置
+          <span class="ml-auto text-xs text-slate-500">占位</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="flex min-w-0 flex-1 flex-col bg-white">
+      <header class="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 px-4">
+        <div class="flex min-w-0 items-center gap-3">
+          <button id="mobileNewChatButton" type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 text-xl text-slate-700 md:hidden">+</button>
+          <div class="min-w-0">
+            <h1 id="currentTitle" class="truncate text-base font-semibold text-slate-900">新的论文对话</h1>
+            <p id="statusText" class="truncate text-xs text-slate-500">可上传论文或直接提问</p>
+          </div>
+        </div>
+        <div id="topLoading" class="hidden items-center gap-2 rounded-full bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700">
+          <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-blue-200 border-t-blue-700"></span>
+          处理中
+        </div>
+      </header>
+
+      <section id="messageList" class="chat-scrollbar flex-1 overflow-y-auto bg-slate-50 px-4 py-6">
+        <div id="welcomeState" class="mx-auto flex h-full max-w-3xl flex-col items-center justify-center text-center">
+          <div class="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-600 text-2xl text-white">🤖</div>
+          <h2 class="mt-5 text-2xl font-semibold text-slate-900">PaperPilot</h2>
+          <p class="mt-2 max-w-md text-sm leading-6 text-slate-500">上传 PDF 自动生成精读笔记，也可以直接围绕论文、Agent、LLM、RAG 提问。</p>
+        </div>
+      </section>
+
+      <footer class="shrink-0 border-t border-slate-200 bg-white p-3">
+        <div id="uploadProgressWrap" class="mx-auto mb-2 hidden max-w-3xl rounded-md border border-blue-100 bg-blue-50 px-3 py-2">
+          <div class="mb-1 flex items-center justify-between text-xs text-blue-700">
+            <span id="uploadProgressText">正在上传 PDF...</span>
+            <span id="uploadProgressValue">0%</span>
+          </div>
+          <div class="h-1.5 overflow-hidden rounded-full bg-blue-100">
+            <div id="uploadProgressBar" class="h-full w-0 rounded-full bg-blue-600 transition-all"></div>
+          </div>
+        </div>
+
+        <div class="relative mx-auto flex max-w-3xl items-end gap-2 rounded-xl border border-slate-300 bg-white p-2 shadow-sm focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100">
+          <button id="plusButton" type="button" class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-2xl text-slate-600 transition hover:bg-slate-100">+</button>
+          <div id="plusMenu" class="absolute bottom-16 left-2 hidden w-56 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
+            <button id="uploadPdfMenuItem" type="button" class="flex w-full items-center gap-3 px-4 py-3 text-left text-sm hover:bg-slate-50">
+              <span>📄</span>
+              上传 PDF
+            </button>
+            <button id="arxivMenuItem" type="button" class="flex w-full items-center gap-3 px-4 py-3 text-left text-sm hover:bg-slate-50">
+              <span>🔍</span>
+              搜索 arxiv
+            </button>
+          </div>
+          <textarea id="messageInput" rows="1" placeholder="输入问题，Enter 发送，Shift+Enter 换行" class="max-h-40 min-h-10 flex-1 resize-none border-0 bg-transparent px-1 py-2 text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400"></textarea>
+          <button id="sendButton" type="button" class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+            <span class="text-lg">↑</span>
+          </button>
+        </div>
+        <input id="pdfInput" class="hidden" type="file" accept="application/pdf,.pdf">
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    const conversationList = document.getElementById("conversationList");
+    const newChatButton = document.getElementById("newChatButton");
+    const mobileNewChatButton = document.getElementById("mobileNewChatButton");
+    const currentTitle = document.getElementById("currentTitle");
+    const statusText = document.getElementById("statusText");
+    const messageList = document.getElementById("messageList");
+    const welcomeState = document.getElementById("welcomeState");
+    const messageInput = document.getElementById("messageInput");
+    const sendButton = document.getElementById("sendButton");
+    const plusButton = document.getElementById("plusButton");
+    const plusMenu = document.getElementById("plusMenu");
+    const uploadPdfMenuItem = document.getElementById("uploadPdfMenuItem");
+    const arxivMenuItem = document.getElementById("arxivMenuItem");
+    const pdfInput = document.getElementById("pdfInput");
+    const topLoading = document.getElementById("topLoading");
+    const paperLanguage = document.getElementById("paperLanguage");
+    const uploadProgressWrap = document.getElementById("uploadProgressWrap");
+    const uploadProgressText = document.getElementById("uploadProgressText");
+    const uploadProgressValue = document.getElementById("uploadProgressValue");
+    const uploadProgressBar = document.getElementById("uploadProgressBar");
+
+    let conversations = [];
+    let activeSessionId = "";
+
+    marked.setOptions({
+      breaks: true,
+      highlight(code, language) {
+        if (language && hljs.getLanguage(language)) {
+          return hljs.highlight(code, { language }).value;
+        }
+        return hljs.highlightAuto(code).value;
+      }
+    });
+
+    function createUuid() {
+      if (crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
+      return "session-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+    }
+
+    function getActiveConversation() {
+      return conversations.find((item) => item.sessionId === activeSessionId);
+    }
+
+    function makeTitleFromText(text) {
+      const cleaned = text.replace(/\s+/g, " ").trim();
+      return cleaned ? cleaned.slice(0, 20) : "新的论文对话";
+    }
+
+    function setLoading(isLoading, text = "") {
+      topLoading.classList.toggle("hidden", !isLoading);
+      topLoading.classList.toggle("inline-flex", isLoading);
+      sendButton.disabled = isLoading;
+      statusText.textContent = text || "可上传论文或直接提问";
+    }
+
+    function setUploadProgress(percent, text = "正在上传 PDF...") {
+      uploadProgressWrap.classList.remove("hidden");
+      uploadProgressText.textContent = text;
+      uploadProgressValue.textContent = `${percent}%`;
+      uploadProgressBar.style.width = `${percent}%`;
+    }
+
+    function hideUploadProgress() {
+      uploadProgressWrap.classList.add("hidden");
+      uploadProgressBar.style.width = "0%";
+      uploadProgressValue.textContent = "0%";
+    }
+
+    function renderConversationList() {
+      conversationList.innerHTML = "";
+      conversations.forEach((conversation) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = [
+          "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition",
+          conversation.sessionId === activeSessionId
+            ? "bg-white/15 text-white"
+            : "text-slate-300 hover:bg-white/10 hover:text-white"
+        ].join(" ");
+        button.innerHTML = `<span class="shrink-0">💬</span><span class="truncate">${escapeHtml(conversation.title)}</span>`;
+        button.addEventListener("click", () => switchConversation(conversation.sessionId));
+        conversationList.appendChild(button);
+      });
+    }
+
+    function renderMessages() {
+      const conversation = getActiveConversation();
+      const messages = conversation ? conversation.messages : [];
+      messageList.innerHTML = "";
+      if (!messages.length) {
+        messageList.appendChild(welcomeState);
+        welcomeState.classList.remove("hidden");
+      } else {
+        welcomeState.classList.add("hidden");
+        messages.forEach((message) => {
+          messageList.appendChild(createMessageElement(message));
+        });
+      }
+      scrollToBottom();
+    }
+
+    function createMessageElement(message) {
+      const row = document.createElement("div");
+      const isUser = message.role === "user";
+      row.className = `mx-auto mb-5 flex max-w-3xl gap-3 ${isUser ? "justify-end" : "justify-start"}`;
+
+      const avatar = document.createElement("div");
+      avatar.className = "mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-200 text-base";
+      avatar.textContent = isUser ? "👤" : "🤖";
+
+      const bubble = document.createElement("div");
+      bubble.className = isUser
+        ? "max-w-[78%] rounded-2xl rounded-tr-sm bg-blue-600 px-4 py-3 text-sm leading-6 text-white shadow-sm"
+        : "markdown-body max-w-[84%] rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-800 shadow-sm";
+
+      if (message.loading) {
+        bubble.innerHTML = `<div class="flex items-center gap-2"><span class="h-4 w-4 animate-spin rounded-full border-2 border-blue-200 border-t-blue-700"></span><span>${escapeHtml(message.content)}</span></div>`;
+      } else if (isUser) {
+        bubble.textContent = message.content;
+      } else {
+        bubble.innerHTML = marked.parse(message.content || "");
+        bubble.querySelectorAll("pre code").forEach((block) => hljs.highlightElement(block));
+      }
+
+      if (isUser) {
+        row.appendChild(bubble);
+        row.appendChild(avatar);
+      } else {
+        row.appendChild(avatar);
+        row.appendChild(bubble);
+      }
+      return row;
+    }
+
+    function scrollToBottom() {
+      requestAnimationFrame(() => {
+        messageList.scrollTop = messageList.scrollHeight;
+      });
+    }
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      }[char]));
+    }
+
+    function newConversation() {
+      const sessionId = createUuid();
+      conversations.unshift({
+        sessionId,
+        title: "新的论文对话",
+        messages: []
+      });
+      activeSessionId = sessionId;
+      updateCurrentTitle();
+      renderConversationList();
+      renderMessages();
+    }
+
+    function switchConversation(sessionId) {
+      activeSessionId = sessionId;
+      updateCurrentTitle();
+      renderConversationList();
+      renderMessages();
+    }
+
+    function updateCurrentTitle() {
+      const conversation = getActiveConversation();
+      currentTitle.textContent = conversation ? conversation.title : "新的论文对话";
+    }
+
+    function updateConversationTitle(title) {
+      const conversation = getActiveConversation();
+      if (!conversation) {
+        return;
+      }
+      conversation.title = makeTitleFromText(title);
+      updateCurrentTitle();
+      renderConversationList();
+    }
+
+    function addMessage(role, content, options = {}) {
+      const conversation = getActiveConversation();
+      if (!conversation) {
+        return null;
+      }
+      const message = {
+        id: createUuid(),
+        role,
+        content,
+        loading: Boolean(options.loading)
+      };
+      conversation.messages.push(message);
+      if (role === "user" && conversation.title === "新的论文对话") {
+        conversation.title = makeTitleFromText(content);
+        updateCurrentTitle();
+        renderConversationList();
+      }
+      renderMessages();
+      return message;
+    }
+
+    function updateMessage(messageId, updates) {
+      const conversation = getActiveConversation();
+      if (!conversation) {
+        return;
+      }
+      const message = conversation.messages.find((item) => item.id === messageId);
+      if (!message) {
+        return;
+      }
+      Object.assign(message, updates);
+      renderMessages();
+    }
+
+    async function parseJsonResponse(response) {
+      const text = await response.text();
+      try {
+        return text ? JSON.parse(text) : {};
+      } catch {
+        return { detail: text || "服务返回了无法解析的响应。" };
+      }
+    }
+
+    async function sendChatMessage() {
+      const text = messageInput.value.trim();
+      if (!text) {
+        return;
+      }
+      messageInput.value = "";
+      resizeTextarea();
+      addMessage("user", text);
+      const assistantMessage = addMessage("assistant", "正在思考，请稍候...", { loading: true });
+
+      try {
+        setLoading(true, "正在生成回复");
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: text,
+            session_id: activeSessionId
+          })
+        });
+        const data = await parseJsonResponse(response);
+        if (!response.ok) {
+          throw new Error(data.detail || "聊天请求失败。");
+        }
+        updateMessage(assistantMessage.id, {
+          content: data.reply || "未返回回复。",
+          loading: false
+        });
+      } catch (error) {
+        updateMessage(assistantMessage.id, {
+          content: `聊天失败：${error.message || "网络异常，请稍后重试。"}`,
+          loading: false
+        });
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function uploadPdfWithProgress(file) {
+      return new Promise((resolve, reject) => {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("paper_language", paperLanguage.value || "zh");
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/papers/upload");
+
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const percent = Math.max(1, Math.round((event.loaded / event.total) * 100));
+            setUploadProgress(percent);
+          } else {
+            setUploadProgress(20, "正在上传 PDF...");
+          }
+        };
+
+        xhr.onload = () => {
+          const data = safeJsonParse(xhr.responseText);
+          if (xhr.status >= 200 && xhr.status < 300) {
+            setUploadProgress(100, "上传完成");
+            resolve(data);
+          } else {
+            reject(new Error(data.detail || "上传失败，请检查 PDF 文件。"));
+          }
+        };
+
+        xhr.onerror = () => reject(new Error("网络异常，上传失败。"));
+        xhr.send(formData);
+      });
+    }
+
+    function safeJsonParse(text) {
+      try {
+        return text ? JSON.parse(text) : {};
+      } catch {
+        return { detail: text || "服务返回了无法解析的响应。" };
+      }
+    }
+
+    async function handlePdfFile(file) {
+      if (!file) {
+        return;
+      }
+      if (!file.name.toLowerCase().endsWith(".pdf")) {
+        addMessage("assistant", "请选择 PDF 文件。");
+        return;
+      }
+
+      addMessage("user", `上传论文：${file.name}`);
+      const readingMessage = addMessage("assistant", "正在读取论文，请稍候...", { loading: true });
+
+      try {
+        setLoading(true, "正在上传 PDF");
+        setUploadProgress(1, "正在上传 PDF...");
+        const uploadData = await uploadPdfWithProgress(file);
+        const paperId = uploadData.paper_id;
+        if (!paperId) {
+          throw new Error("上传成功但未返回 paper_id。");
+        }
+
+        setLoading(true, "正在分析论文");
+        updateMessage(readingMessage.id, {
+          content: "正在读取论文，请稍候...",
+          loading: true
+        });
+
+        const language = encodeURIComponent(paperLanguage.value || "zh");
+        const analyzeResponse = await fetch(`/api/papers/${encodeURIComponent(paperId)}/analyze?paper_language=${language}`, {
+          method: "POST"
+        });
+        const analyzeData = await parseJsonResponse(analyzeResponse);
+        if (!analyzeResponse.ok) {
+          throw new Error(analyzeData.detail || "分析请求失败。");
+        }
+        if (analyzeData.success === false) {
+          throw new Error(analyzeData.error_message || "分析失败，请查看后端日志。");
+        }
+
+        const noteResponse = await fetch(`/api/papers/${encodeURIComponent(paperId)}/note`);
+        const noteData = await parseJsonResponse(noteResponse);
+        if (!noteResponse.ok) {
+          throw new Error(noteData.detail || "精读笔记读取失败。");
+        }
+
+        const title = analyzeData.title || file.name.replace(/\.pdf$/i, "");
+        updateConversationTitle(title);
+        updateMessage(readingMessage.id, {
+          content: `📄 论文精读完成！以下是精读笔记：\n\n${noteData.content || "暂无笔记内容。"}`,
+          loading: false
+        });
+      } catch (error) {
+        updateMessage(readingMessage.id, {
+          content: `论文处理失败：${error.message || "网络异常，请稍后重试。"}`,
+          loading: false
+        });
+      } finally {
+        hideUploadProgress();
+        setLoading(false);
+        pdfInput.value = "";
+      }
+    }
+
+    function resizeTextarea() {
+      messageInput.style.height = "auto";
+      messageInput.style.height = Math.min(messageInput.scrollHeight, 160) + "px";
+    }
+
+    newChatButton.addEventListener("click", newConversation);
+    mobileNewChatButton.addEventListener("click", newConversation);
+    sendButton.addEventListener("click", sendChatMessage);
+    messageInput.addEventListener("input", resizeTextarea);
+    messageInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendChatMessage();
+      }
+    });
+
+    plusButton.addEventListener("click", () => {
+      plusMenu.classList.toggle("hidden");
+    });
+
+    uploadPdfMenuItem.addEventListener("click", () => {
+      plusMenu.classList.add("hidden");
+      pdfInput.click();
+    });
+
+    arxivMenuItem.addEventListener("click", () => {
+      plusMenu.classList.add("hidden");
+      addMessage("assistant", "🔍 搜索 arxiv 即将推出。");
+    });
+
+    pdfInput.addEventListener("change", () => {
+      handlePdfFile(pdfInput.files[0]);
+    });
+
+    document.addEventListener("click", (event) => {
+      if (!plusMenu.contains(event.target) && !plusButton.contains(event.target)) {
+        plusMenu.classList.add("hidden");
+      }
+    });
+
+    newConversation();
+  </script>
+</body>
+</html>
