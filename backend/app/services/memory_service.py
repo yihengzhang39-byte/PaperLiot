@@ -1,15 +1,25 @@
-"""Controlled write-back for PaperPilot's single writable research-memory file."""
+"""Controlled write-back for PaperPilot's research and user-profile memory."""
 
 from pathlib import Path
 import re
 
 
 MEMORY_FILE = Path(__file__).resolve().parents[2] / "memory" / "memory.md"
+USER_PROFILE_FILE = Path(__file__).resolve().parents[2] / "memory" / "user.md"
 MEMORY_HEADINGS = {
     "paper": "## 已分析论文列表",
     "theme": "## 用户关注的研究主题",
     "finding": "## 跨论文发现的规律",
 }
+USER_PROFILE_FIELDS = (
+    "university",
+    "education",
+    "identity",
+    "research_interest",
+    "technical_background",
+    "preferences",
+)
+USER_PROFILE_LIST_FIELDS = {"research_interest", "technical_background", "preferences"}
 
 
 def load_research_memory(*, memory_file: Path | None = None) -> str:
@@ -70,3 +80,99 @@ def append_memory_entry(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return {"saved": True, "reason": "added", "category": category, "entry": entry}
+
+
+def _empty_user_profile() -> dict[str, str | list[str]]:
+    return {field: [] if field in USER_PROFILE_LIST_FIELDS else "" for field in USER_PROFILE_FIELDS}
+
+
+def _read_user_profile(path: Path) -> dict[str, str | list[str]]:
+    profile = _empty_user_profile()
+    current_list: str | None = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return profile
+    for line in lines:
+        key, separator, value = line.partition(":")
+        if separator and key in USER_PROFILE_FIELDS:
+            current_list = key if key in USER_PROFILE_LIST_FIELDS else None
+            if current_list is None:
+                profile[key] = value.strip()
+            continue
+        if current_list and line.strip().startswith("- "):
+            profile[current_list].append(line.strip()[2:].strip())  # type: ignore[union-attr]
+    return profile
+
+
+def _profile_list(value: list[str] | None, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list of strings")
+    entries: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field} must be a list of strings")
+        normalized = _normalize_entry(item)
+        if normalized.casefold() not in {entry.casefold() for entry in entries}:
+            entries.append(normalized)
+    return entries
+
+
+def _render_user_profile(profile: dict[str, str | list[str]]) -> str:
+    lines = ["# User Profile"]
+    for field in USER_PROFILE_FIELDS:
+        value = profile[field]
+        if field in USER_PROFILE_LIST_FIELDS:
+            lines.append(f"{field}:")
+            lines.extend(f"  - {item}" for item in value)
+        else:
+            lines.append(f"{field}: {value}")
+    return "\n".join(lines) + "\n"
+
+
+def save_user_profile(
+    *,
+    university: str = "",
+    education: str = "",
+    identity: str = "",
+    research_interest: list[str] | None = None,
+    technical_background: list[str] | None = None,
+    preferences: list[str] | None = None,
+    user_file: Path | None = None,
+) -> dict[str, object]:
+    """Upsert explicit, stable user-profile fields into the fixed profile file."""
+    path = user_file or USER_PROFILE_FILE
+    profile = _read_user_profile(path)
+    updates: dict[str, str | list[str]] = {}
+    for field, value in (("university", university), ("education", education), ("identity", identity)):
+        if value:
+            updates[field] = _normalize_entry(value)
+    for field, value in (
+        ("research_interest", research_interest),
+        ("technical_background", technical_background),
+        ("preferences", preferences),
+    ):
+        entries = _profile_list(value, field)
+        if entries:
+            updates[field] = entries
+    if not updates:
+        raise ValueError("at least one user profile field is required")
+
+    changed: dict[str, str | list[str]] = {}
+    for field, value in updates.items():
+        if field not in USER_PROFILE_LIST_FIELDS:
+            if profile[field] != value:
+                profile[field] = value
+                changed[field] = value
+            continue
+        if profile[field] != value:
+            profile[field] = value
+            changed[field] = value
+    if not changed:
+        return {"saved": False, "reason": "unchanged", "profile": profile}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_render_user_profile(profile), encoding="utf-8")
+    return {"saved": True, "reason": "updated", "updated_fields": changed, "profile": profile}

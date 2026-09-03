@@ -11,8 +11,8 @@ PaperPilot 是一个科研论文阅读 Agent 后端项目，当前目标是完�
 - Web 层：`app/main.py` 创建 FastAPI app，注册 CORS 和 `/api/papers` 路由，并提供 `/health`。
 - Static 层：`backend/static/index.html` 是单文件 ChatGPT 风格浏览器前端；`app/main.py` 使用 FastAPI `StaticFiles` 将 `backend/static/` 挂载到 `/static`，并通过 `GET /` 返回 `index.html`。
 - API 层：`app/api/routes/paper.py` 提供 PDF 上传、按 `paper_id` 分析、读取生成笔记三类接口。
-- Chat 层：`app/api/routes/chat.py` 通过安全 JSON session 持久化语义历史、当前 `paper_id` 和 `active_paper_ids`；`POST /api/chat/stream` 用 SSE 转发同一 Agent Loop 的安全运行时事件和真实 LLM delta，完成后才持久化 final turn。
-- Memory 层：每轮 Paper Agent 从 `soul.md`、`user.md`、`memory.md` 读取上下文；仅 `memory.md` 可由受控、去重的 Tool 写回，读取失败静默降级。
+- Chat 层：`app/api/routes/chat.py` 通过安全 JSON session 持久化语义历史、当前 `paper_id` 和 `active_paper_ids`；`POST /api/chat/stream` 用 SSE 转发同一 Agent Loop 的运行时事件和 final delta，完成后才持久化 final turn。
+- Memory 层：每轮 Paper Agent 从 `soul.md`、`user.md`、`memory.md` 读取上下文；`save_research_memory` 受控、去重写入 `memory.md`，`save_user_profile` 仅更新 `user.md` 的固定长期档案字段，读取失败静默降级。
 - Agent 层：`app/agents/paper_graph.py` 使用 LangGraph 串联固定分析节点，状态定义在 `app/agents/paper_state.py`；`app/agents/paper_agent.py` 是 Chat 真实 provider 路径使用的 Paper Tool Agent 入口。
 - Agent Runtime 层：`app/runtime/` 提供独立的 Tool Registry 和同步 Tool Executor，供 Paper Agent 的真实 provider 路径调用。
 - 节点层：`app/agents/nodes/` 包含 PDF 解析、策略规划、论文信息抽取、章节抽取、章节校验、章节修复、方法分析、实验分析、笔记写作等节点。
@@ -71,7 +71,7 @@ pdf_parse_node
 - `backend/app/services/llm_service.py`：mock provider、真实 OpenAI-compatible chat completions、JSON 清洗解析和 SSE content/tool-call delta 解析。
 - `backend/app/services/retrieval_service.py`：section-aware chunk、JSON index 与纯 Python lexical retrieval。
 - `backend/app/services/session_service.py`：哈希文件名的 JSON session load/save 与语义历史裁剪。
-- `backend/app/services/memory_service.py`：仅固定 `memory.md` 的受控、去重写回。
+- `backend/app/services/memory_service.py`：`memory.md` 的 research memory 受控去重写回，以及 `user.md` 固定字段的 user profile 覆盖写回。
 - `backend/app/tools/memory_tools.py`、`backend/app/tools/multi_paper_tools.py`：memory 和多论文 Agent Tool 注册。
 - `backend/scripts/run_analyze_paper.py`：CLI 分析单个 PDF。
 - `backend/static/index.html`：浏览器前端入口，提供 ChatGPT 风格对话、内存会话历史、待发送 PDF 附件、SSE execution activity、final delta Markdown 渲染和错误提示。
@@ -101,11 +101,11 @@ pdf_parse_node
 - 单文件 HTML 前端支持 ChatGPT 风格对话、前端内存历史、新建对话和待发送 PDF 附件；上传只保存为当前输入框的 pending attachment，不写入聊天消息、不调用 Agent，用户点击发送后才把 `message/session_id/paper_id` 交给动态 Agent 路径。
 - pending PDF 附件可通过 `DELETE /api/papers/{paper_id}` 取消；仅删除该 ID 的 PDF、metadata、note、chunk index 和 `paper_id` 匹配的 section JSON。
 - 支持 `POST /api/chat` 对话接口；请求可选传入 `paper_id`，否则继承 session 当前论文；JSON session 在重启后恢复并只保存 user/final assistant 历史。
-- 支持 `POST /api/chat/stream` SSE；同一 Agent Loop 发送 `agent_start`、step/LLM、tool、final delta、done/error 事件，前端完整显示安全 Tool 摘要并可按消息展开/收起，不显示模型 reasoning 或完整 Tool payload。
+- 支持 `POST /api/chat/stream` SSE；同一 Agent Loop 发送 `agent_start`、step/LLM、tool、final delta、done/error 事件，前端按 Agent Runtime 展示真实执行阶段、Tool 参数和安全摘要并可展开/收起；不显示模型 reasoning、LLM content 或完整 Tool payload。
 - 真实 LLM provider 的 Chat 经 `Paper Agent -> Agent Loop -> Tool Runtime -> GROBID/PyMuPDF Parser、Paper/Retrieval/Memory/Multi-paper Tools` 执行；mock provider 不进入该链路且不访问外部服务。
 - Chat parser Tool 按 `paper_id + parser` 缓存结果；GROBID/PyMuPDF 均由 LLM 独立调用，字段缺失或失败不会在 parser service 内触发另一个 parser。
 - 支持 section-aware chunk 和按 parser source 隔离的本地 JSON index 的 lexical retrieval，返回 top-k 有来源标记的 chunk，不返回全文。
-- 支持每轮在 Paper Agent system prompt 中读取 `backend/memory/`；仅显式调用 `save_research_memory` 才会写入 `memory.md`，并有固定分类与去重。
+- 支持每轮在 Paper Agent system prompt 中读取 `backend/memory/`；`save_research_memory` 仅写入 `memory.md` 的 paper/theme/finding，`save_user_profile` 仅写入 `user.md` 的 university/education/identity/research_interest/technical_background/preferences。
 - 同一 session 可积累 `active_paper_ids`；`get_multi_paper_context` 分别返回各论文的 retrieval 结果和错误状态。
 - 记录上传文件 metadata，包括 `paper_language`。
 - 按 `paper_id` 找到本地 PDF 并运行 LangGraph 分析。

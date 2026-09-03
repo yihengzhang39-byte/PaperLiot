@@ -222,7 +222,7 @@
       });
     }
 
-    function renderMessages() {
+    function renderMessages(shouldScroll = true) {
       const conversation = getActiveConversation();
       const messages = conversation ? conversation.messages : [];
       messageList.innerHTML = "";
@@ -235,7 +235,9 @@
           messageList.appendChild(createMessageElement(message));
         });
       }
-      scrollToBottom();
+      if (shouldScroll) {
+        scrollToBottom();
+      }
     }
 
     function createMessageElement(message) {
@@ -253,37 +255,72 @@
         : "markdown-body max-w-[84%] rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-800 shadow-sm";
 
       if (isUser) {
-        bubble.textContent = message.content;
+        if (message.attachment?.filename) {
+          const attachment = document.createElement("div");
+          attachment.className = "mb-1 flex items-center gap-1 text-xs text-blue-100";
+          attachment.textContent = `📄 ${message.attachment.filename}`;
+          bubble.appendChild(attachment);
+        }
+        const content = document.createElement("div");
+        content.textContent = message.content;
+        bubble.appendChild(content);
       } else {
         if (message.activity?.length) {
           const toggleActivity = document.createElement("button");
           toggleActivity.type = "button";
           toggleActivity.className = "mb-2 text-xs text-blue-600 hover:text-blue-800";
           toggleActivity.textContent = message.activityCollapsed
-            ? `展开思考过程（${message.activity.length} 条）`
-            : `收起思考过程（${message.activity.length} 条）`;
+            ? `展开运行过程（${message.activity.length} 条）`
+            : `收起运行过程（${message.activity.length} 条）`;
           toggleActivity.setAttribute("aria-expanded", String(!message.activityCollapsed));
           toggleActivity.addEventListener("click", () => updateMessage(message.id, {
             activityCollapsed: !message.activityCollapsed
-          }));
+          }, false));
           bubble.appendChild(toggleActivity);
 
           if (!message.activityCollapsed) {
             const activity = document.createElement("div");
             activity.className = "mb-3 space-y-1 rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500";
+            const title = document.createElement("div");
+            title.className = "font-semibold text-slate-700";
+            title.textContent = "Agent Runtime";
+            activity.appendChild(title);
             message.activity.forEach((entry) => {
               const item = document.createElement("div");
-              item.textContent = entry;
+              if (entry.type === "agent") {
+                item.textContent = entry.status === "completed" ? "✓ Agent 执行完成" : "⏳ Agent 已启动";
+              } else if (entry.type === "step") {
+                item.className = "pt-1 font-semibold text-slate-700";
+                item.textContent = `Step ${entry.step}`;
+              } else if (entry.type === "llm") {
+                item.textContent = entry.status === "completed"
+                  ? "✓ LLM 已生成下一步操作"
+                  : entry.status === "recovery"
+                    ? "⏳ Agent 正在尝试恢复..."
+                  : "⏳ 正在分析请求...";
+              } else if (entry.type === "final") {
+                item.textContent = entry.status === "completed" ? "✓ 回答生成完成" : "⏳ 正在生成回答...";
+              } else if (entry.type === "tool_call") {
+                const title = document.createElement("div");
+                title.className = "font-semibold text-slate-700";
+                title.textContent = `✓ Tool Call: ${entry.name}`;
+                const argumentsView = document.createElement("pre");
+                argumentsView.className = "mt-1 overflow-x-auto rounded bg-slate-100 p-2 text-[11px] leading-4 text-slate-700";
+                argumentsView.textContent = JSON.stringify(entry.arguments, null, 2);
+                item.append(title, argumentsView);
+              } else if (entry.type === "tool_start") {
+                const prefix = entry.status === "error" ? "⚠" : entry.status === "completed" ? "✓" : "⏳";
+                const action = entry.status === "running" ? "正在执行" : entry.status === "error" ? "执行失败" : "执行完成";
+                item.textContent = `${prefix} ${action}: ${entry.name}`;
+              } else if (entry.type === "tool_result") {
+                item.innerHTML = `<span class="font-semibold text-slate-700">${entry.success ? "✓" : "⚠"} Tool Result: ${escapeHtml(entry.name)}</span><br>${escapeHtml(entry.summary)}`;
+              } else {
+                item.textContent = `⚠ ${entry.content}`;
+              }
               activity.appendChild(item);
             });
             bubble.appendChild(activity);
           }
-        }
-        if (message.loading && !message.content) {
-          const loading = document.createElement("div");
-          loading.className = "flex items-center gap-2 text-sm";
-          loading.innerHTML = '<span class="h-4 w-4 animate-spin rounded-full border-2 border-blue-200 border-t-blue-700"></span><span>正在思考，请稍候...</span>';
-          bubble.appendChild(loading);
         }
         if (message.content) {
           const answer = document.createElement("div");
@@ -380,6 +417,7 @@
         role,
         content,
         loading: Boolean(options.loading),
+        attachment: options.attachment || null,
         activity: Array.isArray(options.activity) ? options.activity : [],
         activityCollapsed: Boolean(options.activityCollapsed)
       };
@@ -393,7 +431,7 @@
       return message;
     }
 
-    function updateMessage(messageId, updates) {
+    function updateMessage(messageId, updates, shouldScroll = true) {
       const conversation = getActiveConversation();
       if (!conversation) {
         return;
@@ -403,7 +441,7 @@
         return;
       }
       Object.assign(message, updates);
-      renderMessages();
+      renderMessages(shouldScroll);
     }
 
     async function parseJsonResponse(response) {
@@ -415,14 +453,41 @@
       }
     }
 
-    function addRuntimeActivity(messageId, content) {
+    function addRuntimeActivity(messageId, entry) {
       const conversation = getActiveConversation();
       const message = conversation?.messages.find((item) => item.id === messageId);
       if (!message) {
         return;
       }
-      message.activity = [...(message.activity || []), content];
+      message.activity = [...(message.activity || []), entry];
       renderMessages();
+    }
+
+    function setRuntimeStatus(messageId, type, status, toolCallId = "") {
+      const conversation = getActiveConversation();
+      const message = conversation?.messages.find((item) => item.id === messageId);
+      if (!message) {
+        return;
+      }
+      for (let index = (message.activity || []).length - 1; index >= 0; index -= 1) {
+        const entry = message.activity[index];
+        if (entry.type === type && (!toolCallId || entry.toolCallId === toolCallId)) {
+          entry.status = status;
+          renderMessages();
+          return;
+        }
+      }
+    }
+
+    function previousToolFailed(messageId) {
+      const conversation = getActiveConversation();
+      const activity = conversation?.messages.find((item) => item.id === messageId)?.activity || [];
+      for (let index = activity.length - 1; index >= 0; index -= 1) {
+        if (activity[index].type === "tool_result") {
+          return activity[index].success === false;
+        }
+      }
+      return false;
     }
 
     function appendMessageContent(messageId, delta) {
@@ -467,30 +532,58 @@
     function applyAgentEvent(messageId, event) {
       switch (event.type) {
         case "agent_start":
-          addRuntimeActivity(messageId, "正在分析问题");
+          addRuntimeActivity(messageId, { type: "agent", status: "running" });
           break;
         case "step_start":
-          addRuntimeActivity(messageId, `步骤 ${event.step}`);
+          addRuntimeActivity(messageId, { type: "step", step: event.step });
+          break;
+        case "llm_start":
+          addRuntimeActivity(messageId, {
+            type: "llm",
+            step: event.step,
+            status: previousToolFailed(messageId) ? "recovery" : "running"
+          });
           break;
         case "tool_call":
-          addRuntimeActivity(messageId, `调用 ${event.name}`);
+          setRuntimeStatus(messageId, "llm", "completed");
+          addRuntimeActivity(messageId, {
+            type: "tool_call",
+            toolCallId: event.tool_call_id,
+            name: event.name,
+            arguments: event.arguments || {}
+          });
           break;
         case "tool_start":
-          addRuntimeActivity(messageId, `正在执行 ${event.name}`);
+          addRuntimeActivity(messageId, {
+            type: "tool_start",
+            toolCallId: event.tool_call_id,
+            name: event.name,
+            status: "running"
+          });
           break;
         case "tool_result":
-          addRuntimeActivity(messageId, `${event.status === "success" ? "✓" : "×"} ${event.name}：${event.summary}`);
+          setRuntimeStatus(messageId, "tool_start", event.success ? "completed" : "error", event.tool_call_id);
+          addRuntimeActivity(messageId, {
+            type: "tool_result",
+            name: event.name,
+            success: event.success === true,
+            summary: event.summary || ""
+          });
           break;
         case "final_start":
-          addRuntimeActivity(messageId, "正在生成回答");
+          setRuntimeStatus(messageId, "llm", "completed");
+          addRuntimeActivity(messageId, { type: "final", step: event.step, status: "running" });
+          updateMessage(messageId, { activityCollapsed: true });
           break;
         case "final_delta":
           appendMessageContent(messageId, event.delta || "");
           break;
         case "error":
-          addRuntimeActivity(messageId, `× ${event.message || "请求失败"}`);
+          addRuntimeActivity(messageId, { type: "error", content: "Agent 执行失败" });
           break;
         case "agent_done":
+          setRuntimeStatus(messageId, "final", "completed");
+          setRuntimeStatus(messageId, "agent", "completed");
           updateMessage(messageId, { loading: false });
           break;
       }
@@ -503,6 +596,7 @@
       }
       const conversation = getActiveConversation();
       const pendingAttachment = conversation?.pendingAttachment;
+      const sentAttachment = pendingAttachment ? { ...pendingAttachment } : null;
       const paperId = pendingAttachment?.paperId || conversation?.paperId || null;
       if (pendingAttachment && conversation?.pendingAttachment === pendingAttachment) {
         conversation.paperId = pendingAttachment.paperId;
@@ -511,7 +605,7 @@
       }
       messageInput.value = "";
       resizeTextarea();
-      addMessage("user", text);
+      addMessage("user", text, { attachment: sentAttachment });
       const assistantMessage = addMessage("assistant", "", { loading: true });
 
       try {

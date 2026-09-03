@@ -34,6 +34,10 @@ def main() -> None:
     )
     tool_result = run_agent(_context(), tools={"echo": lambda text: {"text": text}}, llm_call=tool_llm)
     assert tool_result.final_answer == "tool returned hello" and len(tool_calls) == 2
+    assert tool_result.events[0] == {"type": "user_message", "content": "hello"}
+    assert next(event for event in tool_result.events if event["type"] == "llm_message") == {
+        "type": "llm_message", "step": 1, "content": ""
+    }
     assistant_call = next(message for message in tool_result.context.messages if message["role"] == "assistant" and message["tool_calls"])
     tool_message = next(message for message in tool_result.context.messages if message["role"] == "tool")
     assert assistant_call["tool_calls"][0]["id"] == tool_message["tool_call_id"] == "call_1"

@@ -10,7 +10,7 @@ from app.agents.agent_loop import AgentMaxStepsError, run_agent
 from app.agents.paper_agent import run_paper_agent
 from app.api.routes import chat
 from app.services import llm_service, session_service
-from app.services.llm_service import AgentLLMDelta, AgentToolCallDelta
+from app.services.llm_service import AgentLLMDelta, AgentLLMResponse, AgentToolCall, AgentToolCallDelta
 
 
 def _context(max_steps: int = 8) -> AgentContext:
@@ -72,15 +72,17 @@ def main() -> None:
     )
     assert direct.final_answer == "hello world"
     assert _types(direct) == [
-        "agent_start", "step_start", "llm_start", "final_start", "final_delta", "final_delta", "final_end", "step_end", "agent_done",
+        "user_message", "agent_start", "step_start", "llm_start", "llm_delta", "llm_delta", "llm_message", "final_start", "final_delta", "final_delta", "final_end", "step_end", "agent_done",
     ]
+    assert direct.events[0] == {"type": "user_message", "content": "hello"}
+    assert next(event for event in direct.events if event["type"] == "llm_message")["content"] == "hello world"
 
     tool_final = run_agent(
         _context(),
         tools={"echo": lambda text: {"text": text}},
         llm_stream=_stream_batches(
             [
-                [AgentLLMDelta(tool_calls=[AgentToolCallDelta(0, "echo-1", "echo", '{"text":"hello')]), AgentLLMDelta(tool_calls=[AgentToolCallDelta(0, arguments_delta='"}')])],
+                [AgentLLMDelta("我需要调用工具。"), AgentLLMDelta(tool_calls=[AgentToolCallDelta(0, "echo-1", "echo", '{"text":"hello')]), AgentLLMDelta(tool_calls=[AgentToolCallDelta(0, arguments_delta='"}')])],
                 [AgentLLMDelta("tool final")],
             ]
         ),
@@ -88,6 +90,7 @@ def main() -> None:
     assert tool_final.final_answer == "tool final"
     assert all(name in _types(tool_final) for name in ("tool_call", "tool_start", "tool_result"))
     assert next(event for event in tool_final.events if event["type"] == "tool_call")["arguments"] == {"text": "hello"}
+    assert next(event for event in tool_final.events if event["type"] == "llm_message")["content"] == "我需要调用工具。"
 
     multi = run_agent(
         _context(),
@@ -125,6 +128,7 @@ def main() -> None:
     )
     assert any(event["type"] == "tool_result" and event["status"] == "error" for event in invalid.events)
     assert any(event["type"] == "tool_result" and event["status"] == "error" for event in unknown.events)
+    assert next(event for event in invalid.events if event["type"] == "tool_call")["arguments"] == {"raw": "not-json"}
 
     max_events: list[dict[str, object]] = []
     try:
@@ -157,6 +161,18 @@ def main() -> None:
     )
     assert received == ["method section"] and fragmented.final_answer == "found"
 
+    visible_responses = [
+        AgentLLMResponse("我需要先查询论文信息。", [AgentToolCall("visible", "echo", "{}")]),
+        AgentLLMResponse("已获得结果。", []),
+    ]
+    visible_tool_response = run_agent(
+        _context(),
+        tools={"echo": lambda: "ok"},
+        llm_call=lambda *_args: visible_responses.pop(0),
+    )
+    assert next(event for event in visible_tool_response.events if event["type"] == "llm_message") == {
+        "type": "llm_message", "step": 1, "content": "我需要先查询论文信息。"
+    }
     original_runner = chat.run_paper_agent
     original_session_dir = session_service.CHAT_SESSIONS_DIR
     with tempfile.TemporaryDirectory() as directory:

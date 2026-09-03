@@ -58,15 +58,15 @@ def _event_arguments(arguments: str | dict[str, Any]) -> dict[str, Any]:
     try:
         parsed = json.loads(arguments)
     except (TypeError, json.JSONDecodeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        return {"raw": arguments}
+    return parsed if isinstance(parsed, dict) else {"raw": arguments}
 
 
 def _merge_stream_tool_calls(
     deltas: Iterable[AgentLLMDelta],
     on_content: Callable[[str], None],
 ) -> tuple[AgentLLMResponse, bool]:
-    """Collect fragmented calls while forwarding real content deltas immediately."""
+    """Collect fragmented calls while forwarding real assistant content deltas."""
     content_parts: list[str] = []
     calls: dict[int, dict[str, str]] = {}
     saw_tool_call = False
@@ -81,8 +81,7 @@ def _merge_stream_tool_calls(
             current["arguments"] += tool_delta.arguments_delta
         if delta.content:
             content_parts.append(delta.content)
-            if not saw_tool_call:
-                on_content(delta.content)
+            on_content(delta.content)
     tool_calls = [
         AgentToolCall(
             id=value["id"] or f"call_{index + 1}",
@@ -124,6 +123,10 @@ def run_agent(
         if isinstance(event_type, str):
             emit(event_type, **{key: value for key, value in event.items() if key != "type"})
 
+    for message in reversed(context.messages):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            emit("user_message", content=message["content"])
+            break
     emit("agent_start", max_steps=context.max_steps)
 
     try:
@@ -132,17 +135,14 @@ def run_agent(
             emit("step_start", step=context.step)
             emit("llm_start", step=context.step)
 
-            streamed_final_started = False
+            streamed_content: list[str] = []
             if llm_stream is None:
                 response = llm_call(context.messages, tool_specs)
             else:
                 def emit_stream_content(delta: str) -> None:
-                    nonlocal streamed_final_started
                     if delta:
-                        if not streamed_final_started:
-                            emit("final_start", step=context.step)
-                            streamed_final_started = True
-                        emit("final_delta", step=context.step, delta=delta)
+                        streamed_content.append(delta)
+                        emit("llm_delta", step=context.step, delta=delta)
 
                 response, _ = _merge_stream_tool_calls(
                     llm_stream(context.messages, tool_specs),
@@ -158,11 +158,15 @@ def run_agent(
             )
             trace.append({"step": context.step, "tool_call_count": len(response.tool_calls)})
 
+            # Only provider-visible assistant content is emitted here; hidden
+            # reasoning fields are never part of AgentLLMResponse.
+            emit("llm_message", step=context.step, content=response.content)
+
             if not response.tool_calls:
-                if not streamed_final_started:
-                    emit("final_start", step=context.step)
-                    if response.content:
-                        emit("final_delta", step=context.step, delta=response.content)
+                emit("final_start", step=context.step)
+                for delta in streamed_content or [response.content]:
+                    if delta:
+                        emit("final_delta", step=context.step, delta=delta)
                 emit("final_end", step=context.step)
                 emit("step_end", step=context.step, status="final")
                 emit("agent_done")

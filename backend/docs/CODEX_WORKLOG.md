@@ -41,6 +41,76 @@ This file records important Codex work sessions, decisions, and handoff notes.
 
 ## Recent Work
 
+### 2026-09-03 22:32 - DSH 风格 Agent Runtime
+
+**Goal:**
+
+将聊天中的“思考过程”和无限 loading 改为由 SSE Agent Event 驱动的真实运行阶段展示。
+
+**Files changed:**
+
+- `static/index.html`：保留现有聊天布局和折叠交互，名称改为“运行过程”；映射 Agent、Step、LLM 请求、Tool Call/Start/Result、最终回答和错误状态。
+- `scripts/test_agent_runtime_ui.py`：静态验证 Runtime 映射完整、无“正在思考”文案及无 COT 内容渲染。
+
+**Decisions made:**
+
+- 不改 Agent Loop、Tool Runtime、SSE route 或 LangGraph；直接复用既有事件。
+- Tool 执行中的状态只绑定 `tool_start`；`tool_result` 将其更新为完成/失败，下一次 `llm_start` 在失败后显示恢复状态。
+- Runtime Trace 不展示 `llm_message`、`llm_delta` 或 hidden reasoning；最终文本仅由 `final_delta` 进入回答区域。
+
+**Validation:**
+
+- `test_agent_streaming`、`test_agent_runtime_ui`、内联 JavaScript 语法和 `git diff --check` 通过；未启动服务或调用真实 LLM/外网。
+
+---
+
+### 2026-09-03 17:47 - User Profile Memory
+
+**Goal:**
+
+为长期用户身份、院校、学历、兴趣、技术背景和偏好新增独立的受控写回路径，不混入 research memory。
+
+**Files changed:**
+
+- `app/services/memory_service.py`、`app/tools/memory_tools.py`：新增固定字段的 `save_user_profile`，仅写入 `user.md`；保留 `save_research_memory` 原行为。
+- `app/agents/paper_agent.py`：仅在用户明确陈述或纠正长期档案信息时允许调用新 Tool。
+- `memory/user.md`：转为固定字段的 YAML 格式，保留原有档案值。
+- 本地 memory/paper-agent 回归：覆盖院校纠正、列表替换、Tool 注册和 research memory 隔离。
+
+**Decisions made:**
+
+- 标量字段覆盖更新；兴趣、技术背景和偏好列表由 Tool 提供完整目标值并整体替换，以支持删除旧条目。
+- 不引入 YAML 依赖或可写路径参数；仅接受白名单字段，空值和错误类型被拒绝。
+
+**Validation:**
+
+- `test_memory_service`、`test_paper_agent`、`test_agent_loop`、`test_agent_streaming` 通过；未调用真实 LLM、外网或启动服务。
+
+---
+
+### 2026-09-03 17:10 - SSE 显示真实 LLM 与 Tool 事件
+
+**Goal:**
+
+将聊天“思考过程”从通用运行日志改为模型可见回复、Tool 调用参数和 Tool 结果摘要的完整步骤。
+
+**Files changed:**
+
+- `app/agents/agent_loop.py`：发送当前 `user_message`，每轮都发送 assistant `content`（包括空字符串）的 `llm_message`；流式内容发送 `llm_delta`，最终回答仍通过 `final_delta` 输出。
+- `app/runtime/tool_executor.py`：`tool_result` 增加明确 `success` 字段。
+- `static/index.html`：按“User Message / LLM Input / 步骤 / LLM / Tool Call / Tool Result / 最终回答”结构化展示；空模型 content 如实显示为 `content = ""`，参数以 JSON 显示，移除“正在分析/正在执行”等泛化日志。
+- `scripts/test_agent_streaming.py`：覆盖带内容的流式 Tool Call 与非流式 Tool Call。
+
+**Decisions made:**
+
+- 仅发送 API 正常 assistant content、结构化 Tool Call 与安全结果摘要；不发送 hidden reasoning 或完整 Tool 原始 payload。
+
+**Validation:**
+
+- 本地 Agent Loop、streaming、Tool Runtime、Chat integration 回归及内联 JavaScript 语法检查通过；未启动服务或调用真实 LLM/外网。
+
+---
+
 ### 2026-09-03 16:45 - Agent 自主选择 PDF Parser Tool
 
 **Goal:**

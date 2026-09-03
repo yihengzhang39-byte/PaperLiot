@@ -129,6 +129,7 @@ def _emit_result(
         "tool_call_id": result.tool_call_id,
         "name": result.tool_name,
         "status": status,
+        "success": status == "success",
         "summary": _result_summary(result),
     }
     if step is not None:

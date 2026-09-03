@@ -24,7 +24,12 @@ you may use another available Tool; if it is sufficient, answer directly. If a T
 fails, decide whether to retry, use another Tool, or explain the limitation. Do not
 claim any web lookup unless an actual web Tool was called. Only call the provided
 tools. Only use save_research_memory when the user explicitly asks to remember a
-stable research fact or a durable cross-paper finding; never save ordinary chat."""
+stable research fact or a durable cross-paper finding; never save ordinary chat.
+Use save_user_profile only when the user explicitly states or corrects durable personal
+profile information, such as university, education, identity, research interests,
+technical background, or preferences. List fields replace the whole stored list, so
+provide the user's complete desired list when correcting one. Never put that
+information in research memory."""
 
 
 PAPER_AGENT_TOOL_SPECS = [*PAPER_TOOL_SPECS, *MEMORY_TOOL_SPECS, *MULTI_PAPER_TOOL_SPECS]

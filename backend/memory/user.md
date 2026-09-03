@@ -1,6 +1,17 @@
 # User Profile
-
-- 身份：人工智能方向硕士研究生，江南大学。
-- 研究兴趣：agent 开发、multi-agent、LLM、RAG、tool use。
-- 技术背景：Python、FastAPI、LangGraph、ChromaDB、PyTorch。
-- 偏好：简洁中文摘要，关注方法创新和实验结果。
+university: 江南大学
+education: 本科
+identity: 人工智能方向本科生
+research_interest:
+  - 目标检测
+  - 小目标检测
+  - 菌落计数
+technical_background:
+  - Python
+  - FastAPI
+  - LangGraph
+  - ChromaDB
+  - PyTorch
+preferences:
+  - 简洁中文摘要
+  - 关注方法创新和实验结果

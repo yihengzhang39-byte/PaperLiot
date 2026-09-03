@@ -52,6 +52,7 @@ def _assert_paper_schemas(tools: list[dict[str, object]]) -> None:
         "extract_sections",
         "retrieve_paper_context",
         "save_research_memory",
+        "save_user_profile",
         "get_multi_paper_context",
     ]
 
