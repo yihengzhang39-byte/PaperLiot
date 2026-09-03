@@ -20,7 +20,14 @@ def main() -> None:
         root = Path(directory)
         originals = {
             name: getattr(file_service, name)
-            for name in ("PAPERS_DIR", "NOTES_DIR", "PAPER_METADATA_DIR", "PAPER_CHUNKS_DIR", "PAPER_SECTION_JSON_DIR")
+            for name in (
+                "PAPERS_DIR",
+                "NOTES_DIR",
+                "PAPER_METADATA_DIR",
+                "PAPER_CHUNKS_DIR",
+                "PAPER_PARSE_CACHE_DIR",
+                "PAPER_SECTION_JSON_DIR",
+            )
         }
         try:
             for name in originals:
@@ -33,6 +40,8 @@ def main() -> None:
             (file_service.NOTES_DIR / f"{paper_id}.md").write_text("note", encoding="utf-8")
             (file_service.PAPER_METADATA_DIR / f"{paper_id}.json").write_text("{}", encoding="utf-8")
             (file_service.PAPER_CHUNKS_DIR / f"{paper_id}.json").write_text("[]", encoding="utf-8")
+            (file_service.PAPER_CHUNKS_DIR / f"{paper_id}_grobid.json").write_text("[]", encoding="utf-8")
+            (file_service.PAPER_PARSE_CACHE_DIR / f"{paper_id}_grobid.json").write_text("{}", encoding="utf-8")
             (file_service.PAPER_SECTION_JSON_DIR / "paper.json").write_text(json.dumps({"paper_id": paper_id}), encoding="utf-8")
             (file_service.PAPERS_DIR / f"{other_id}_paper.pdf").write_bytes(b"other")
             (file_service.PAPER_SECTION_JSON_DIR / "other.json").write_text(json.dumps({"paper_id": other_id}), encoding="utf-8")
@@ -42,6 +51,8 @@ def main() -> None:
             assert not (file_service.NOTES_DIR / f"{paper_id}.md").exists()
             assert not (file_service.PAPER_METADATA_DIR / f"{paper_id}.json").exists()
             assert not (file_service.PAPER_CHUNKS_DIR / f"{paper_id}.json").exists()
+            assert not (file_service.PAPER_CHUNKS_DIR / f"{paper_id}_grobid.json").exists()
+            assert not (file_service.PAPER_PARSE_CACHE_DIR / f"{paper_id}_grobid.json").exists()
             assert not (file_service.PAPER_SECTION_JSON_DIR / "paper.json").exists()
             assert (file_service.PAPERS_DIR / f"{other_id}_paper.pdf").exists()
             assert (file_service.PAPER_SECTION_JSON_DIR / "other.json").exists()

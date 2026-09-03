@@ -21,7 +21,7 @@ def main() -> None:
         "--paper-language",
         choices=["zh", "en"],
         default="zh",
-        help="Paper language: zh uses PyMuPDF, en prefers GROBID.",
+        help="Paper language metadata for downstream analysis; parser comes from PDF_PARSER.",
     )
     args = parser.parse_args()
 

@@ -256,14 +256,28 @@
         bubble.textContent = message.content;
       } else {
         if (message.activity?.length) {
-          const activity = document.createElement("div");
-          activity.className = "mb-3 space-y-1 rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500";
-          message.activity.slice(-8).forEach((entry) => {
-            const item = document.createElement("div");
-            item.textContent = entry;
-            activity.appendChild(item);
-          });
-          bubble.appendChild(activity);
+          const toggleActivity = document.createElement("button");
+          toggleActivity.type = "button";
+          toggleActivity.className = "mb-2 text-xs text-blue-600 hover:text-blue-800";
+          toggleActivity.textContent = message.activityCollapsed
+            ? `展开思考过程（${message.activity.length} 条）`
+            : `收起思考过程（${message.activity.length} 条）`;
+          toggleActivity.setAttribute("aria-expanded", String(!message.activityCollapsed));
+          toggleActivity.addEventListener("click", () => updateMessage(message.id, {
+            activityCollapsed: !message.activityCollapsed
+          }));
+          bubble.appendChild(toggleActivity);
+
+          if (!message.activityCollapsed) {
+            const activity = document.createElement("div");
+            activity.className = "mb-3 space-y-1 rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500";
+            message.activity.forEach((entry) => {
+              const item = document.createElement("div");
+              item.textContent = entry;
+              activity.appendChild(item);
+            });
+            bubble.appendChild(activity);
+          }
         }
         if (message.loading && !message.content) {
           const loading = document.createElement("div");
@@ -366,7 +380,8 @@
         role,
         content,
         loading: Boolean(options.loading),
-        activity: Array.isArray(options.activity) ? options.activity : []
+        activity: Array.isArray(options.activity) ? options.activity : [],
+        activityCollapsed: Boolean(options.activityCollapsed)
       };
       conversation.messages.push(message);
       if (role === "user" && conversation.title === "新的论文对话") {

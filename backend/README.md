@@ -126,11 +126,10 @@ PDF_PARSER=pymupdf
 
 后端接口现在也支持 `paper_language`：
 
-- `paper_language=zh`：中文论文，强制请求 `PyMuPDF`
-- `paper_language=en`：英文论文，优先请求 `GROBID`
-- 旧请求不传 `paper_language` 时默认 `zh`
-- `PDF_PARSER` 仍是默认 parser 配置；但请求中传入 `paper_language` 后，`pdf_parse_node` 会按语言覆盖 parser 选择
-- 如果英文论文走 GROBID 失败、解析为空或质量太差，会 fallback 到 PyMuPDF，最终 `parser_name` 会显示真实使用的 parser
+- `paper_language` 是上传 metadata 和后续分析策略信息，不决定 parser。
+- 旧 `POST /api/papers/{paper_id}/analyze` LangGraph 路线使用 `PDF_PARSER` 配置指定一个 parser。
+- 普通聊天路线把 `parse_pdf_with_grobid`、`parse_pdf_with_pymupdf` 提供给 LLM；模型可在同一任务中分别调用二者并根据 Tool Result 决定下一步。
+- parser 不会自动 fallback：GROBID 失败或字段缺失会原样作为 Tool Result 返回，由 Agent 决定是否调用 PyMuPDF。
 
 可以通过 `.env` 切换 parser：
 
@@ -146,7 +145,7 @@ PDF_PARSER_TIMEOUT=30
 - `grobid`：调用本地 GROBID `/api/processFulltextDocument`，解析 TEI XML 并返回 `ParsedPaper`
 - `docling` / `marker` / `mineru`：预留实验 adapter，依赖未安装或未接入时会安全失败
 
-如果非默认 parser 失败或返回空 `raw_text`，`parser_service` 会 fallback 到 `PyMuPDFParser`，保证单篇论文精读流程尽量继续运行。
+parser_service 只执行明确指定的 parser；失败会返回给调用方，不会在服务层自动切换到另一个 parser。
 
 之所以仍保留 `raw_text`：当前章节抽取和 LLM 分析节点都依赖纯文本输入。新的 `ParsedPaper` 会同时写入 state 的 `parsed_paper`，方便后续比较 PyMuPDF / GROBID / Marker / MinerU / Docling 的结构化解析质量。
 
@@ -302,7 +301,7 @@ GROBID parser 会上传 PDF 到：
 POST {GROBID_BASE_URL}/api/processFulltextDocument
 ```
 
-并从返回的 TEI XML 中尽量提取 `title`、`authors`、`abstract`、`sections` 和 `raw_text`。如果 GROBID 服务不可用、超时、返回 204/400/500/503、XML 解析失败或抽取文本为空，系统会 fallback 到 PyMuPDF，并在 `parser_warnings` 中记录失败原因。
+并从返回的 TEI XML 中尽量提取 `title`、`authors`、`abstract`、`keywords`、`sections`、`references` 和 `raw_text`。GROBID 服务不可用、超时、返回 204/400/500/503、XML 解析失败或抽取文本为空时，不会自动切换到 PyMuPDF；聊天 Agent 会收到失败 Tool Result，并自行决定是否调用 PyMuPDF Tool。
 
 对中文论文，如果 GROBID 没有把“引言”“材料与方法”“结果与分析”“讨论”“结论”等识别成 TEI `head`，GROBID parser 会从 body 的 `head/p` block 中使用中文标题规则做 `zh_heading_fallback`，结果放入 `ParsedPaper.sections`，调试信息放入 `parser_meta.section_titles` 和 `parser_meta.section_extraction_method`。
 

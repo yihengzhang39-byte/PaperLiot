@@ -7,7 +7,7 @@ from xml.etree.ElementTree import Element
 
 from app.core.config import get_pdf_parser_config
 from app.services.parsers.base import BasePDFParser
-from app.services.parsers.schema import ParsedPaper, ParsedSection
+from app.services.parsers.schema import ParsedPaper, ParsedReference, ParsedSection
 
 
 TEI_NS = {"tei": "http://www.tei-c.org/ns/1.0"}
@@ -117,6 +117,40 @@ def _extract_authors(root: Element, ns: dict[str, str]) -> list[str]:
             authors.append(name)
 
     return authors
+
+
+def _extract_keywords(root: Element, ns: dict[str, str]) -> list[str]:
+    """Extract available TEI keyword terms without treating their absence as failure."""
+    keywords: list[str] = []
+    for term in root.findall(".//tei:profileDesc//tei:keywords//tei:term", ns):
+        value = _text_content(term)
+        if value and value not in keywords:
+            keywords.append(value)
+    return keywords
+
+
+def _extract_references(root: Element, ns: dict[str, str]) -> list[ParsedReference]:
+    """Extract bibliography entries that GROBID made available in TEI."""
+    references: list[ParsedReference] = []
+    for entry in root.findall(".//tei:listBibl//tei:biblStruct", ns):
+        title = _text_content(entry.find(".//tei:analytic/tei:title", ns))
+        if not title:
+            title = _text_content(entry.find(".//tei:monogr/tei:title", ns))
+        authors: list[str] = []
+        for author in entry.findall(".//tei:author", ns):
+            forenames = [_text_content(item) for item in author.findall(".//tei:forename", ns)]
+            surnames = [_text_content(item) for item in author.findall(".//tei:surname", ns)]
+            name = " ".join(value for value in [*forenames, *surnames] if value) or _text_content(author)
+            if name and name not in authors:
+                authors.append(name)
+        date = entry.find(".//tei:date", ns)
+        year = ""
+        if date is not None:
+            year = str(date.get("when", "") or _text_content(date))[:4]
+        text = _text_content(entry)
+        if text:
+            references.append(ParsedReference(text=text, title=title, authors=authors, year=year or None))
+    return references
 
 
 def _extract_sections_from_tei_divs(root: Element, ns: dict[str, str]) -> list[dict[str, object]]:
@@ -328,11 +362,13 @@ def _parse_tei_xml(tei_xml: str) -> dict[str, object]:
 
     title = _text_content(root.find(".//tei:titleStmt/tei:title", TEI_NS))
     authors = _extract_authors(root, TEI_NS)
+    keywords = _extract_keywords(root, TEI_NS)
     abstract = _text_content(root.find(".//tei:profileDesc//tei:abstract", TEI_NS))
     if not abstract:
         abstract = _text_content(root.find(".//tei:abstract", TEI_NS))
 
     sections, section_extraction_method = _extract_sections(root, TEI_NS)
+    references = _extract_references(root, TEI_NS)
     raw_text = _build_raw_text_from_sections(sections)
 
     body = root.find(".//tei:text//tei:body", TEI_NS)
@@ -384,9 +420,11 @@ def _parse_tei_xml(tei_xml: str) -> dict[str, object]:
     return {
         "title": title,
         "authors": authors,
+        "keywords": keywords,
         "abstract": abstract,
         "raw_text": raw_text,
         "sections": parsed_sections,
+        "references": references,
         "grobid_sections": grobid_sections,
         "section_titles": section_titles,
         "section_extraction_method": section_extraction_method,
@@ -424,6 +462,7 @@ class GROBIDParser(BasePDFParser):
             authors=list(parsed.get("authors", [])),
             abstract=str(parsed.get("abstract", "")),
             sections=list(parsed.get("sections", [])),
+            references=list(parsed.get("references", [])),
             parser_warnings=warnings,
             parser_meta={
                 "pdf_path": str(Path(pdf_path)),
@@ -432,6 +471,8 @@ class GROBIDParser(BasePDFParser):
                 "raw_text_length": len(raw_text),
                 "tei_xml_length": len(tei_xml),
                 "section_count": len(parsed.get("sections", [])),
+                "keywords": parsed.get("keywords", []),
+                "reference_count": len(parsed.get("references", [])),
                 "section_titles": parsed.get("section_titles", []),
                 "section_extraction_method": parsed.get("section_extraction_method", ""),
                 "title": parsed.get("title", ""),

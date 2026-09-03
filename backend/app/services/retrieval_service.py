@@ -25,7 +25,11 @@ class PaperChunk:
     end_char: int
 
 
-def _chunk_path(paper_id: str, storage_dir: Path | None = None) -> Path:
+def _chunk_path(
+    paper_id: str,
+    storage_dir: Path | None = None,
+    parser_name: str | None = None,
+) -> Path:
     if (
         not paper_id.strip()
         or paper_id in {".", ".."}
@@ -33,7 +37,10 @@ def _chunk_path(paper_id: str, storage_dir: Path | None = None) -> Path:
         or Path(paper_id).name != paper_id
     ):
         raise ValueError("paper_id must be a plain non-empty identifier")
-    return (storage_dir or PAPER_CHUNKS_DIR) / f"{paper_id}.json"
+    if parser_name is not None and not re.fullmatch(r"[a-z0-9_]+", parser_name):
+        raise ValueError("parser_name must contain only lowercase letters, numbers, or underscores")
+    suffix = f"_{parser_name}" if parser_name else ""
+    return (storage_dir or PAPER_CHUNKS_DIR) / f"{paper_id}{suffix}.json"
 
 
 def _split_section(text: str, chunk_size: int, overlap: int) -> Iterable[tuple[int, int, str]]:
@@ -86,17 +93,28 @@ def build_paper_chunks(
     return chunks
 
 
-def save_paper_chunks(paper_id: str, chunks: list[PaperChunk], *, storage_dir: Path | None = None) -> Path:
+def save_paper_chunks(
+    paper_id: str,
+    chunks: list[PaperChunk],
+    *,
+    storage_dir: Path | None = None,
+    parser_name: str | None = None,
+) -> Path:
     """Persist one paper's local index as UTF-8 JSON."""
-    path = _chunk_path(paper_id, storage_dir)
+    path = _chunk_path(paper_id, storage_dir, parser_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps([asdict(chunk) for chunk in chunks], ensure_ascii=False), encoding="utf-8")
     return path
 
 
-def load_paper_chunks(paper_id: str, *, storage_dir: Path | None = None) -> list[PaperChunk]:
+def load_paper_chunks(
+    paper_id: str,
+    *,
+    storage_dir: Path | None = None,
+    parser_name: str | None = None,
+) -> list[PaperChunk]:
     """Load a previously built local index."""
-    path = _chunk_path(paper_id, storage_dir)
+    path = _chunk_path(paper_id, storage_dir, parser_name)
     if not path.exists():
         raise FileNotFoundError(f"Paper chunk index not found: {paper_id}")
     try:
@@ -148,6 +166,7 @@ def retrieve_paper_chunks(
     *,
     top_k: int | None = None,
     storage_dir: Path | None = None,
+    parser_name: str | None = None,
 ) -> dict[str, object]:
     """Retrieve bounded relevant context from a persisted paper index."""
     if not isinstance(query, str) or not query.strip():
@@ -158,6 +177,11 @@ def retrieve_paper_chunks(
         raise ValueError("top_k must be an integer")
     return {
         "paper_id": paper_id,
+        "parser": parser_name or "",
         "query": query.strip(),
-        "chunks": retrieve_chunks(load_paper_chunks(paper_id, storage_dir=storage_dir), query.strip(), effective_top_k),
+        "chunks": retrieve_chunks(
+            load_paper_chunks(paper_id, storage_dir=storage_dir, parser_name=parser_name),
+            query.strip(),
+            effective_top_k,
+        ),
     }

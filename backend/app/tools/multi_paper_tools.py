@@ -27,7 +27,13 @@ def get_multi_paper_context(
     for paper_id in unique_ids:
         try:
             result = retrieve_paper_context(paper_id=paper_id, query=query, top_k=top_k)
-            papers.append({"paper_id": paper_id, "chunks": result["chunks"], "error": ""})
+            papers.append(
+                {
+                    "paper_id": paper_id,
+                    "chunks": result["chunks"],
+                    "error": "" if result.get("success") else str(result.get("warning", "No cached parser result.")),
+                }
+            )
         except (FileNotFoundError, ValueError) as exc:
             papers.append({"paper_id": paper_id, "chunks": [], "error": str(exc)})
     return {"query": query.strip(), "papers": papers}

@@ -88,6 +88,16 @@ def _result_summary(result: ToolExecutionResult) -> str:
         return f"{result.tool_name} completed"
     if not isinstance(payload, dict):
         return f"{result.tool_name} completed"
+    parser = payload.get("parser")
+    if parser in {"grobid", "pymupdf"}:
+        if payload.get("success") is False:
+            return f"{parser} failed: {str(payload.get('error', 'unknown error'))[:140]}"
+        if isinstance(payload.get("pages"), list):
+            return f"{parser} extracted {len(payload['pages'])} page(s)"
+        if isinstance(payload.get("sections"), list):
+            missing = payload.get("missing_fields", [])
+            suffix = ", title missing" if "title" in missing else ""
+            return f"{parser} parsed {len(payload['sections'])} sections{suffix}"
     if isinstance(payload.get("chunks"), list):
         return f"retrieved {len(payload['chunks'])} relevant chunks"
     if isinstance(payload.get("papers"), list):
@@ -106,11 +116,19 @@ def _emit_result(
 ) -> None:
     if event_sink is None:
         return
+    status = "success" if result.ok else "error"
+    if result.ok:
+        try:
+            payload = json.loads(result.content)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("success") is False:
+            status = "error"
     event: dict[str, Any] = {
         "type": "tool_result",
         "tool_call_id": result.tool_call_id,
         "name": result.tool_name,
-        "status": "success" if result.ok else "error",
+        "status": status,
         "summary": _result_summary(result),
     }
     if step is not None:

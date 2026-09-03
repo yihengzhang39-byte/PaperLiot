@@ -41,6 +41,90 @@ This file records important Codex work sessions, decisions, and handoff notes.
 
 ## Recent Work
 
+### 2026-09-03 16:45 - Agent 自主选择 PDF Parser Tool
+
+**Goal:**
+
+取消基于 `paper_language` 的 parser 强制路由和 GROBID→PyMuPDF 内部 fallback；普通聊天改由 LLM 在现有 Agent Loop 中自主调用 GROBID/PyMuPDF Tool，旧 LangGraph API 保留并仅使用 `PDF_PARSER`。
+
+**Files inspected:**
+
+- `backend/app/services/parser_service.py`、`app/services/parsers/`
+- `backend/app/tools/paper_tools.py`、`app/runtime/tool_executor.py`、`app/agents/paper_agent.py`
+- `backend/app/agents/nodes/pdf_parse_node.py`、`paper_graph.py`、`app/api/routes/paper.py`
+- `backend/app/services/file_service.py`、`retrieval_service.py`
+- 既有 Agent、Tool、retrieval、delete、chat integration 与 streaming 测试脚本
+
+**Files changed:**
+
+- `parser_service.py`、`pdf_parse_node.py`：删除 language router 和 parser 内部 fallback；旧 LangGraph 仅用 `PDF_PARSER`。
+- `paper_tools.py`：新增 `parse_pdf_with_grobid`、`parse_pdf_with_pymupdf`；现有论文信息、章节和 retrieval Tool 仅消费 parser cache。
+- `config.py`、`file_service.py`、`retrieval_service.py`：增加按 `paper_id + parser` 隔离的 parser cache/chunk index，并在删除 paper 时清理。
+- `grobid_parser.py`：补充 TEI keywords 和 references 提取。
+- `tool_executor.py`、`paper_agent.py`：增加 parser Tool 的安全 SSE 摘要与自主选择提示。
+- README、CLI help、Codex 状态及相关本地测试：同步新契约。
+
+**Commands run:**
+
+- Python AST 全量检查
+- `scripts.test_agent_loop`、`test_tool_runtime`、`test_paper_tools`、`test_paper_agent`
+- `test_chat_agent_integration`、`test_retrieval`、`test_session_persistence`、`test_memory_service`
+- `test_multi_paper`、`test_paper_delete`、`test_agent_streaming`、`test_parser_selection`
+
+**Decisions made:**
+
+- GROBID 缺少 title/authors 仍是成功 Tool Result；真正失败也返回结构化失败结果，绝不自动调用 PyMuPDF。
+- `parse_pdf_with_pymupdf` 默认读取第一页，可显式传 `pages`；第一次解析结果会缓存，后续同 parser Tool 不重复解析。
+- 未引入额外 `PaperDocument` 抽象；既有 `ParsedPaper` 加 parser-specific cache 足以保留来源和避免重复解析。
+
+**Validation:**
+
+- 本地 scripted LLM 验证了 GROBID title missing → 下一轮 LLM 显式调用 PyMuPDF → final answer，且 SSE event 中出现两个 Tool 名与安全摘要。
+- 本地验证 GROBID 异常会原样停止在 GROBID，不发生 PyMuPDF fallback；旧 `pdf_parse_node` 不传 language 给 parser。
+- 未启动服务、未调用真实 LLM、未启动/访问 GROBID、未访问外网、未修改 `.env`。
+
+**Open questions / next steps:**
+
+- 真实 GROBID 服务的端到端兼容性仍需在用户允许启动本地服务后验证。
+
+---
+
+### 2026-09-03 16:09 - 完整显示可折叠的 Agent 步骤
+
+**Goal:**
+
+保留流式 Agent 的完整执行步骤，并让用户能展开或收起每条 assistant 消息的思考过程。
+
+**Files inspected:**
+
+- `backend/static/index.html`
+- `backend/app/agents/agent_loop.py`
+
+**Files changed:**
+
+- `backend/static/index.html`：移除 activity 仅展示最新 8 条的前端裁剪；增加每条 assistant 消息独立的“展开/收起思考过程”按钮。
+
+**Commands run:**
+
+- `node --check`（从 HTML 提取的内联脚本）
+- Node 静态断言
+- `git diff --check -- backend/static/index.html`
+
+**Decisions made:**
+
+- 默认展开完整步骤；收起只影响步骤区，不影响最终回答；不修改 SSE、Agent Loop 或 Tool Runtime。
+
+**Validation:**
+
+- JavaScript 语法、完整步骤/按钮静态断言和 diff whitespace 检查通过。
+- 未启动服务、未调用真实 LLM 或外网。
+
+**Open questions / next steps:**
+
+- 无。
+
+---
+
 ### 2026-09-03 15:55 - Phase 7 Agent Streaming Runtime
 
 **Goal:**

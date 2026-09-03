@@ -12,6 +12,7 @@ from app.core.config import (
     NOTES_DIR,
     PAPER_CHUNKS_DIR,
     PAPER_METADATA_DIR,
+    PAPER_PARSE_CACHE_DIR,
     PAPER_SECTION_JSON_DIR,
     PAPERS_DIR,
     ensure_storage_dirs,
@@ -75,6 +76,35 @@ def read_paper_metadata(paper_id: str) -> dict[str, Any]:
         return {}
 
 
+def _parse_cache_path(paper_id: str, parser_name: str) -> Path:
+    """Return a safe per-paper, per-parser cache path."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", paper_id):
+        raise ValueError("paper_id must contain only letters, numbers, underscores, or hyphens")
+    if not re.fullmatch(r"[a-z0-9_]+", parser_name):
+        raise ValueError("parser_name must contain only lowercase letters, numbers, or underscores")
+    return PAPER_PARSE_CACHE_DIR / f"{paper_id}_{parser_name}.json"
+
+
+def save_paper_parse_cache(paper_id: str, parser_name: str, payload: Mapping[str, Any]) -> None:
+    """Persist one parser result without merging it with another parser's data."""
+    ensure_storage_dirs()
+    _parse_cache_path(paper_id, parser_name).write_text(
+        json.dumps(dict(payload), ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def read_paper_parse_cache(paper_id: str, parser_name: str) -> dict[str, Any] | None:
+    """Read one parser-specific cached result, if available."""
+    path = _parse_cache_path(paper_id, parser_name)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def save_upload_pdf(file: UploadFile, paper_language: str = "zh") -> dict[str, str]:
     """Save an uploaded PDF into local paper storage."""
     ensure_storage_dirs()
@@ -130,6 +160,8 @@ def delete_paper_data(paper_id: str) -> bool:
         NOTES_DIR / f"{paper_id}.md",
         PAPER_METADATA_DIR / f"{paper_id}.json",
         PAPER_CHUNKS_DIR / f"{paper_id}.json",
+        *PAPER_CHUNKS_DIR.glob(f"{paper_id}_*.json"),
+        *PAPER_PARSE_CACHE_DIR.glob(f"{paper_id}_*.json"),
     ]
     deleted = False
     for path in paths:

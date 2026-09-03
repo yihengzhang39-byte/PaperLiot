@@ -17,6 +17,7 @@ NOTES_DIR = STORAGE_DIR / "notes"
 PAPER_SECTION_JSON_DIR = STORAGE_DIR / "paper_section_json"
 PAPER_METADATA_DIR = STORAGE_DIR / "paper_metadata"
 PAPER_CHUNKS_DIR = STORAGE_DIR / "paper_chunks"
+PAPER_PARSE_CACHE_DIR = STORAGE_DIR / "paper_parse_cache"
 CHAT_SESSIONS_DIR = STORAGE_DIR / "chat_sessions"
 
 if load_dotenv is not None:
@@ -233,4 +234,5 @@ def ensure_storage_dirs() -> None:
     PAPER_SECTION_JSON_DIR.mkdir(parents=True, exist_ok=True)
     PAPER_METADATA_DIR.mkdir(parents=True, exist_ok=True)
     PAPER_CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+    PAPER_PARSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     CHAT_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,7 @@ def _load_chat_route():
 
     fastapi.APIRouter = APIRouter
     fastapi.HTTPException = HTTPException
+    fastapi.UploadFile = object
     responses = ModuleType("fastapi.responses")
     responses.StreamingResponse = type("StreamingResponse", (), {})
     fastapi.responses = responses
@@ -123,13 +124,11 @@ def main() -> None:
     original_config = chat.get_llm_config
     original_runner = chat.run_paper_agent
     original_memory_loader = chat._load_memory_context
-    original_loader = paper_tools._load_paper
     original_session_dir = session_service.CHAT_SESSIONS_DIR
     session_directory = tempfile.TemporaryDirectory()
     chat.get_llm_config = lambda: SimpleNamespace(provider="deepseek")
     memory_context = _load_test_memory(chat)
     chat._load_memory_context = lambda: memory_context
-    paper_tools._load_paper = lambda _paper_id: (_parsed_paper(), "zh", "pymupdf")
     session_service.CHAT_SESSIONS_DIR = Path(session_directory.name)
     try:
         chat.SESSION_HISTORY.clear()
@@ -200,7 +199,6 @@ def main() -> None:
         chat.get_llm_config = original_config
         chat.run_paper_agent = original_runner
         chat._load_memory_context = original_memory_loader
-        paper_tools._load_paper = original_loader
         session_service.CHAT_SESSIONS_DIR = original_session_dir
         session_directory.cleanup()
 

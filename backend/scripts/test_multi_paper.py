@@ -29,14 +29,14 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as directory:
         original_dir = retrieval_service.PAPER_CHUNKS_DIR
-        original_loader = paper_tools._load_paper
+        original_cached_loader = paper_tools._load_cached_parse
         retrieval_service.PAPER_CHUNKS_DIR = Path(directory)
-        def load_paper(paper_id):
-            if paper_id == "missing":
-                raise FileNotFoundError("paper not found")
-            return _parsed_paper(paper_id), "zh", "pymupdf"
+        def load_cached_paper(paper_id, parser_name):
+            if paper_id == "missing" or parser_name != "pymupdf":
+                return None
+            return _parsed_paper(paper_id)
 
-        paper_tools._load_paper = load_paper
+        paper_tools._load_cached_parse = load_cached_paper
         try:
             result = get_multi_paper_context(["p1", "p2", "p1"], "共享检索信号", top_k=1)
             assert [paper["paper_id"] for paper in result["papers"]] == ["p1", "p2"]
@@ -70,7 +70,7 @@ def main() -> None:
             assert "get_multi_paper_context" in [tool["function"]["name"] for tool in calls[0][1]]
         finally:
             retrieval_service.PAPER_CHUNKS_DIR = original_dir
-            paper_tools._load_paper = original_loader
+            paper_tools._load_cached_parse = original_cached_loader
 
     print("ALL MULTI PAPER TESTS PASSED")
 

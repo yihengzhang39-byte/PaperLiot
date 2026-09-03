@@ -59,9 +59,9 @@ def main() -> None:
             raise AssertionError("Expected empty query rejection")
 
         original_dir = retrieval_service.PAPER_CHUNKS_DIR
-        original_loader = paper_tools._load_paper
+        original_cached_loader = paper_tools._load_cached_parse
         retrieval_service.PAPER_CHUNKS_DIR = storage_dir
-        paper_tools._load_paper = lambda _paper_id: (_parsed_paper(), "zh", "pymupdf")
+        paper_tools._load_cached_parse = lambda _paper_id, parser_name: _parsed_paper() if parser_name == "pymupdf" else None
         try:
             registry = ToolRegistry()
             paper_tools.register_paper_tools(registry)
@@ -88,7 +88,7 @@ def main() -> None:
             assert any(event.get("tool_name") == "retrieve_paper_context" for event in agent_result.context.metadata["agent_trace"])
         finally:
             retrieval_service.PAPER_CHUNKS_DIR = original_dir
-            paper_tools._load_paper = original_loader
+            paper_tools._load_cached_parse = original_cached_loader
 
     print("ALL RETRIEVAL TESTS PASSED")
 
