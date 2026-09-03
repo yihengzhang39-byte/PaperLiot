@@ -100,3 +100,10 @@ def parse_pdf(pdf_path: str, parser_name: str | None = None) -> ParsedPaper:
     parsed.parser_meta["requested_parser"] = requested_parser
     parsed.parser_meta["final_parser"] = parsed.parser_name
     return parsed
+
+
+def parse_paper_for_language(pdf_path: str, paper_language: str = "zh") -> tuple[ParsedPaper, str, str]:
+    """Parse one paper with the project's language-specific parser policy."""
+    normalized_language = "en" if paper_language == "en" else "zh"
+    requested_parser = "grobid" if normalized_language == "en" else "pymupdf"
+    return parse_pdf(pdf_path, parser_name=requested_parser), normalized_language, requested_parser

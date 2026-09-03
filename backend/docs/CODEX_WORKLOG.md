@@ -41,6 +41,535 @@ This file records important Codex work sessions, decisions, and handoff notes.
 
 ## Recent Work
 
+### 2026-09-03 15:55 - Phase 7 Agent Streaming Runtime
+
+**Goal:**
+
+在不复制 Agent Loop、不改旧 LangGraph 或非流式 Chat API 的前提下，实现 SSE 的 Agent lifecycle、Tool 和真实 provider final delta 流式体验。
+
+**Files inspected:**
+
+- `backend/app/api/routes/chat.py`
+- `backend/app/agents/agent_context.py`、`agent_loop.py`、`paper_agent.py`
+- `backend/app/runtime/tool_executor.py`、`tool_registry.py`
+- `backend/app/services/llm_service.py`
+- `backend/static/index.html`
+- 既有 Agent、Tool、Chat、RAG、session、memory 测试脚本
+
+**Files changed:**
+
+- `backend/app/agents/agent_loop.py`：同一 `run_agent` 增加统一 event sink、event 收集与可选 LLM delta 输入；没有第二套 while loop。
+- `backend/app/runtime/tool_executor.py`：通过 HTTP 无关 callback 上报 `tool_start` 和安全摘要 `tool_result`。
+- `backend/app/services/llm_service.py`：增加 OpenAI-compatible `stream=true` SSE 解析，实时转发 content delta，聚合 tool-call ID/name/arguments fragment。
+- `backend/app/agents/paper_agent.py`：只透传 stream callback/event sink，保持 domain 配置职责。
+- `backend/app/api/routes/chat.py`：新增 `POST /api/chat/stream`，以 queue + daemon worker 把 Agent event sink 转为 SSE；final answer 后才写入 session。
+- `backend/static/index.html`：发送改用 SSE，执行过程展示为 activity，`final_delta` 追加 Markdown 正文。
+- `backend/scripts/test_agent_streaming.py`：新增本地 fake streaming 回归；`test_chat_agent_integration.py` 补充 StreamingResponse stub。
+- `backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md`：更新状态与记录。
+
+**Commands run:**
+
+- `backend/.venv/bin/python -B -m scripts.test_agent_loop`
+- `backend/.venv/bin/python -B -m scripts.test_tool_runtime`
+- `backend/.venv/bin/python -B -m scripts.test_paper_tools`
+- `backend/.venv/bin/python -B -m scripts.test_paper_agent`
+- `backend/.venv/bin/python -B -m scripts.test_chat_agent_integration`
+- `backend/.venv/bin/python -B -m scripts.test_retrieval`
+- `backend/.venv/bin/python -B -m scripts.test_session_persistence`
+- `backend/.venv/bin/python -B -m scripts.test_memory_service`
+- `backend/.venv/bin/python -B -m scripts.test_multi_paper`
+- `backend/.venv/bin/python -B -m scripts.test_paper_delete`
+- `backend/.venv/bin/python -B -m scripts.test_agent_streaming`
+- `node --check -`、Python AST、SSE route 静态检查、`git diff --check`
+
+**Decisions made:**
+
+- runtime events 是有限的可观察状态：`agent_start`、`step_start`、`llm_start`、`tool_call`、`tool_start`、`tool_result`、`step_end`、`final_start`、`final_delta`、`final_end`、`agent_done`、`error`；不包含 hidden reasoning 或 Tool 原始 payload。
+- Tool Runtime 只返回安全摘要到 event sink，完整序列化结果仍只供 Agent 的 tool message 使用。
+- 流式 endpoint 使用原生 `StreamingResponse` SSE；不使用 setTimeout 或完整文本切片伪造流式。
+- client disconnect 可安全关闭 generator，但当前不会终止一次已发出的 provider HTTP 调用；停止生成需要后续取消 token。
+
+**Validation:**
+
+- 新测试覆盖 direct final delta、Tool→final、多 Tool、Tool error、invalid args、unknown tool、max steps、tool arguments fragment、SSE session persistence 和 generator close。
+- provider SSE parser 通过本地 fake `urlopen` 验证 content/tool-call delta；所有回归脚本、JavaScript 语法和 `git diff --check` 通过。
+- 未启动服务、未调用真实 DeepSeek/LLM、未访问外网、未修改 `.env`。
+
+**Open questions / next steps:**
+
+- 如需前端“停止生成”，需基于 request cancellation token 让 Agent Step 边界停止，且单次同步 provider HTTP 无法被强制中断。
+
+---
+
+### 2026-09-03 15:30 - 发送时立即收起 PDF 附件
+
+**Goal:**
+
+修复 pending PDF 附件会持续显示至聊天响应完成的问题；停止按钮需求留待后续单独处理。
+
+**Files inspected:**
+
+- `backend/static/index.html`
+- `backend/app/api/routes/chat.py`
+
+**Files changed:**
+
+- `backend/static/index.html`：点击发送后立即把 pending attachment 转为当前 `paperId` 并移除输入区 chip，不等待 `/api/chat` 返回。
+- `backend/docs/CODEX_WORKLOG.md`：追加本条记录。
+
+**Commands run:**
+
+- `sed -n '370,435p' backend/static/index.html`
+
+**Decisions made:**
+
+- 若聊天请求失败，PDF 仍作为当前会话论文保留在服务端，用户可直接再次提问；不重新显示已发送附件。
+
+**Validation:**
+
+- JavaScript 语法与 `git diff --check` 通过；断言确认 `pendingAttachment` 在 `/api/chat` 请求前清除。
+
+**Open questions / next steps:**
+
+- 停止 Agent 的前端按钮与后端协作取消机制由后续任务处理。
+
+---
+
+### 2026-09-03 15:26 - PDF 改为待发送附件并支持取消清理
+
+**Goal:**
+
+让浏览器选择 PDF 后只显示输入区域的 pending attachment；用户发送文字时才把 `paper_id` 交给 Chat，并可在发送前取消附件及其服务器文件。
+
+**Files inspected:**
+
+- `backend/static/index.html`
+- `backend/app/api/routes/paper.py`
+- `backend/app/services/file_service.py`
+- `backend/app/core/config.py`
+- `backend/app/services/retrieval_service.py`
+- `backend/app/services/session_service.py`
+
+**Files changed:**
+
+- `backend/static/index.html`：新增 PDF 附件 chip 和 ×；上传、上传失败和取消不再写入聊天消息；pending 附件只在成功发送后转为当前 `paperId`。
+- `backend/app/api/routes/paper.py`、`backend/app/services/file_service.py`：新增 `DELETE /api/papers/{paper_id}`，精确清理该生成 ID 的 PDF、metadata、note、chunk index 及匹配的 section JSON。
+- `backend/scripts/test_paper_delete.py`：新增纯本地删除隔离验证，优先使用已安装 FastAPI，仅在缺失时使用最小 stub。
+- `backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md`：更新项目状态和本条记录。
+
+**Commands run:**
+
+- `backend/.venv/bin/python -B -m scripts.test_paper_delete`
+- `backend/.venv/bin/python -B -c "from app.api.routes.paper import ..."`
+- `node --check -`、Python AST 解析、`rg` 静态调用链检查、`git diff --check`
+
+**Decisions made:**
+
+- `paperId` 保留为已发送后的当前论文；`pendingAttachment` 是独立前端状态。发送失败时附件继续保留，成功时才成为当前论文。
+- section JSON 的文件名不含 `paper_id`，删除时读取 JSON 后仅删除 payload 内 `paper_id` 相同的文件，避免误删同名论文的其他数据。
+- 新建对话前会尝试删除当前未发送附件；删除失败时不会把它带入新会话，旧会话仍保留该附件以便重试。
+
+**Validation:**
+
+- `test_paper_delete` 已通过，覆盖 PDF、metadata、note、chunk、section JSON 清理、其他 `paper_id` 隔离和非法 ID 拒绝。
+- 已用实际虚拟环境确认 FastAPI 可导入且 DELETE 路由注册；Node JavaScript 语法检查、Python AST 和 `git diff --check` 通过。
+- 未启动服务、未上传真实文件、未调用 `/api/chat`、LangGraph、真实 LLM 或外网。
+
+**Open questions / next steps:**
+
+- 当前前端会话仅在浏览器内存中；刷新页面前仍未发送的附件无法再由浏览器取消，后续如需可增加服务端 pending-attachment 生命周期机制。
+
+---
+
+### 2026-09-03 - 调整 PDF 上传为仅绑定论文上下文
+
+**Goal:**
+
+让浏览器普通上传流程仅上传并绑定当前 conversation 的 `paperId`，不再自动进入固定 LangGraph 分析或读取精读笔记。
+
+**Files inspected:**
+
+- `backend/AGENTS.md`
+- `backend/static/index.html`
+- `backend/docs/CODEX_WORKLOG.md`
+
+**Files changed:**
+
+- `backend/static/index.html`：移除上传成功后对 `/api/papers/{paper_id}/analyze` 和 `/api/papers/{paper_id}/note` 的自动请求；保留 `paperId` 绑定和 `/api/chat` 请求字段，并显示“论文上传成功，可以开始提问”。
+- `backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md`：更新实际前端上传行为和工作记录。
+
+**Commands run:**
+
+- `sed -n '340,510p' backend/static/index.html`
+- `rg ... backend/static/index.html`
+- `git diff --check`
+
+**Decisions made:**
+
+- 固定 `/api/papers/{paper_id}/analyze` 和 `/note` API 保留，但不由普通前端上传流程自动调用。
+- 上传成功后聚焦现有输入框；同一 conversation 后续 `/api/chat` 继续自动携带绑定的 `paperId`。
+
+**Validation:**
+
+- 静态确认 `handlePdfFile` 只调用 `/api/papers/upload`，`sendChatMessage` 仍发送 `message/session_id/paper_id` 到 `/api/chat`。
+- 未启动服务、未上传文件、未调用真实 LLM 或外网。
+
+**Open questions / next steps:**
+
+- 如需手动触发固定 LangGraph 精读，可后续单独设计显式操作入口；本轮未添加。
+
+---
+
+### 2026-09-03 14:38 - 完成 RAG、持久化、Memory 与多论文基础（第 6/6 步）
+
+**Goal:**
+
+在不改变 Agent Loop、Tool Runtime 或固定 LangGraph 路径的前提下，按 6A→6B→6C→6D 增加本地检索、会话持久化、受控长期记忆和多论文上下文。
+
+**Files inspected:**
+
+- `backend/AGENTS.md`、`backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md`
+- `backend/app/agents/agent_context.py`、`agent_loop.py`、`paper_agent.py`、`paper_graph.py`、`paper_state.py`
+- `backend/app/runtime/tool_registry.py`、`tool_executor.py`
+- `backend/app/tools/paper_tools.py`、`paper_lookup_tools.py`
+- `backend/app/api/routes/chat.py`、`paper.py`
+- `backend/app/services/file_service.py`、`parser_service.py`、`llm_service.py`
+- `backend/app/agents/nodes/`、`backend/static/index.html`、`backend/memory/`、`backend/storage/`
+- `backend/app/core/config.py`、`.env.example`、`README.md`、`requirements.txt` 与现有 scripts
+
+**Files changed:**
+
+- `backend/app/services/retrieval_service.py`、`backend/app/tools/paper_tools.py`：新增 section-aware chunk、JSON index、纯 Python lexical retrieval 和 `retrieve_paper_context`。
+- `backend/app/services/session_service.py`、`backend/app/api/routes/chat.py`：新增哈希文件名的 JSON session 持久化、最近历史裁剪、current/active paper state 和每轮 memory reload。
+- `backend/app/services/memory_service.py`、`backend/app/tools/memory_tools.py`：新增唯一固定到 `memory.md` 的分类、去重写回 Tool。
+- `backend/app/tools/multi_paper_tools.py`、`backend/app/agents/paper_agent.py`：新增多论文检索 Tool、active-paper prompt 与三类 Phase 6 Tool 注册。
+- `backend/app/core/config.py`、`.env.example`、`README.md`、`plan_agent_node.py`：新增 RAG/history 配置和准确的固定流程说明。
+- `backend/scripts/test_retrieval.py`、`test_session_persistence.py`、`test_memory_service.py`、`test_multi_paper.py`：新增四段纯本地验证；同步更新既有 Tool schema 断言和 Chat 临时 session storage。
+- `backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md`：更新状态与本次记录。
+
+**Commands run:**
+
+- `python3 -B -m scripts.test_retrieval`
+- `python3 -B -m scripts.test_session_persistence`
+- `python3 -B -m scripts.test_memory_service`
+- `python3 -B -m scripts.test_multi_paper`
+- `python3 -B -m scripts.test_agent_loop`
+- `python3 -B -m scripts.test_tool_runtime`
+- `python3 -B -m scripts.test_paper_tools`
+- `python3 -B -m scripts.test_paper_agent`
+- `python3 -B -m scripts.test_chat_agent_integration`
+- `python3 -B -c "...ast.parse(...)"`
+- `git diff --check`、`git status --short`
+
+**Decisions made:**
+
+- RAG 使用可配置长度/overlap 的 section-aware chunk 和 token-overlap lexical scoring；不增加 embedding、vector DB 或依赖。每篇 index 为 `storage/paper_chunks/<paper_id>.json`。
+- session 使用 SHA-256 文件名保存 JSON；仅保存/恢复 user 与 final assistant，默认保留最近 20 条，不生成 LLM summary，也不持久化 Tool trace。
+- 仅 `memory.md` 可写；`save_research_memory` 仅允许 paper/theme/finding 分类、500 字内规范化条目和跨分类去重。普通聊天不会自动写入。
+- session 的显式新 `paper_id` 会加入 `active_paper_ids`；多论文 Tool 接收显式 ID，逐篇返回 `paper_id/chunks/error`，不做 Related Work 生成。
+- 固定 LangGraph 不改路由或节点行为；仅更新它的长文策略描述以区分交互式 retrieval。
+
+**Validation:**
+
+- 6A 覆盖 chunk、section 边界、overlap、top-k 命中、未知论文、空 query、Runtime dispatch 与 Agent retrieval；结果不含 raw_text 字段。
+- 6B 覆盖 session save/reload/restart、paper/active paper 恢复、隔离、哈希文件名、history trim 与 Tool trace 过滤。
+- 6C 覆盖 memory read/append/dedupe/invalid category、soul/user 不变、Runtime dispatch、Agent 不写与显式写入。
+- 6D 覆盖 active paper 去重、两篇论文 retrieval 来源、未知论文、Runtime dispatch 与 Agent multi-paper Tool；Phase 1～5 回归均通过。
+- 所有测试均使用 fake LLM、fake paper 或 tempfile；未访问真实 LLM/网络、未启动 Uvicorn/Docker、未修改 `.env` 或用户真实 storage/memory。
+
+**Open questions / next steps:**
+
+- 后续如需生产化，可评估 embedding retrieval、数据库/并发控制、history summary、memory 人工审核和完整多论文分析；本轮不实施。
+
+---
+
+### 2026-09-03 13:46 - 将 Chat 接入 Paper Agent（第 5/6 步）
+
+**Goal:**
+
+让真实 LLM provider 的 `POST /api/chat` 复用 Paper Agent，并保持 session、当前论文、语义历史和只读 memory 上下文连续。
+
+**Files inspected:**
+
+- `backend/AGENTS.md`
+- `backend/docs/CODEX_STATE.md`
+- `backend/docs/CODEX_WORKLOG.md`
+- `backend/app/api/routes/chat.py`
+- `backend/app/api/routes/paper.py`
+- `backend/app/agents/agent_context.py`
+- `backend/app/agents/agent_loop.py`
+- `backend/app/agents/paper_agent.py`
+- `backend/app/runtime/tool_registry.py`
+- `backend/app/runtime/tool_executor.py`
+- `backend/app/tools/paper_tools.py`
+- `backend/app/services/llm_service.py`
+- `backend/app/services/file_service.py`
+- `backend/app/main.py`
+- `backend/static/index.html`
+- `backend/memory/soul.md`
+- `backend/memory/user.md`
+- `backend/memory/memory.md`
+- `backend/scripts/test_agent_loop.py`
+- `backend/scripts/test_tool_runtime.py`
+- `backend/scripts/test_paper_tools.py`
+- `backend/scripts/test_paper_agent.py`
+
+**Files changed:**
+
+- `backend/app/api/routes/chat.py`：扩展可选 `paper_id`、内存 session state、Paper Agent 调用、语义历史保存和安全 Agent 错误响应；mock 保持本地占位回复。
+- `backend/app/agents/paper_agent.py`：支持受控的 history 与额外 system context，保持每次运行仅一个 system prompt 和一个当前 user message。
+- `backend/static/index.html`：前端会话保存 `paperId`；PDF 上传成功后绑定，聊天请求附带该值。
+- `backend/scripts/test_chat_agent_integration.py`：新增纯本地 route-function 集成检查。
+- `backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md`：更新架构与本次记录。
+
+**Commands run:**
+
+- `python3 -B -c "...ast.parse(...)"`
+- `cd backend && python3 -B -m scripts.test_chat_agent_integration`
+- `cd backend && python3 -B -m scripts.test_paper_agent`
+- `cd backend && python3 -B -m scripts.test_paper_tools`
+- `cd backend && python3 -B -m scripts.test_tool_runtime`
+- `cd backend && python3 -B -m scripts.test_agent_loop`
+- `git diff --check`
+- `git status --short`
+
+**Decisions made:**
+
+- Session state 使用最小 `ChatSessionState(messages, paper_id)`；显式 request `paper_id` 覆盖并更新 session，缺省时继承 session，无两者时传给 Agent `None`。
+- session 只保存 user/final assistant，不保存 Tool message、tool call 或 `agent_trace`；调用 Agent 前传入当前 user 之前的 history，避免当前 message 重复。
+- 长期 memory 在 chat 模块启动时只读加载，作为一次 system context 交给 Paper Agent；Paper Agent 不反向依赖 Chat。
+- 选择 mock 方案 A：`LLM_PROVIDER=mock` 返回既有本地占位回复，不进入 Paper Agent，确保不触达真实 LLM。
+- 未新增 Paper Tool、未修改 Tool Runtime、Agent Loop、固定 LangGraph 或现有 upload/analyze/note API。
+
+**Validation:**
+
+- 新增测试通过普通无论文聊天、`get_paper_info -> final`、`extract_sections -> final`、论文继承、session 隔离、论文切换、历史连续、当前 user 去重、memory 注入/读取失败降级、Tool trace 不持久化和 max-step HTTP 错误。
+- Phase 1～4 的四组本地测试及 `git diff --check` 全部通过；未访问真实 LLM/外部网络，也未修改 `.env` 或 `storage/`。
+- 当前运行环境缺少 FastAPI/Pydantic，因此集成测试以最小 stub 直接调用 route function；未运行 TestClient 或 Uvicorn，也未安装依赖。
+
+**Open questions / next steps:**
+
+- 第 6 步再考虑 RAG、检索、持久化会话、history compression、memory 写回和多论文能力；本轮未实施。
+
+---
+
+### 2026-09-03 - 新增目标驱动 Paper Agent（第 4/6 步）
+
+**Goal:**
+
+在不接入 Chat/API 的前提下，让 LLM 通过现有 Agent Loop 自主选择已注册的本地 Paper Tools，并根据 Tool Result 再次推理。
+
+**Files inspected:**
+
+- `backend/AGENTS.md`
+- `backend/docs/CODEX_STATE.md`
+- `backend/docs/CODEX_WORKLOG.md`
+- `backend/app/agents/agent_context.py`
+- `backend/app/agents/agent_loop.py`
+- `backend/app/runtime/tool_registry.py`
+- `backend/app/runtime/tool_executor.py`
+- `backend/app/tools/paper_tools.py`
+- `backend/app/tools/paper_lookup_tools.py`
+- `backend/app/services/llm_service.py`
+- `backend/scripts/test_agent_loop.py`
+- `backend/scripts/test_tool_runtime.py`
+- `backend/scripts/test_paper_tools.py`
+- `backend/app/api/routes/chat.py`
+- `backend/app/agents/paper_graph.py`
+- `backend/app/agents/paper_state.py`
+
+**Files changed:**
+
+- `backend/app/agents/paper_agent.py`：新增 Paper Agent prompt、显式 `paper_id` 上下文、Paper Tool registry/schema 组装和 `run_paper_agent` 入口。
+- `backend/scripts/test_paper_agent.py`：新增 fake LLM 的多步骤、无 Tool、未知 Tool 恢复、无论文和 max-step 验证。
+- `backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md`：最小架构记录更新。
+
+**Commands run:**
+
+- `python3 -B -c "...ast.parse(...)"`
+- `cd backend && python3 -B -m scripts.test_paper_agent`
+- `cd backend && python3 -B -m scripts.test_paper_tools`
+- `cd backend && python3 -B -m scripts.test_tool_runtime`
+- `cd backend && python3 -B -m scripts.test_agent_loop`
+- `git diff --check`
+
+**Decisions made:**
+
+- Paper Agent 只有领域配置职责，直接复用 `run_agent`；没有关键词路由、隐式 `paper_id` 注入或第二套 while loop。
+- 默认只注册并向 LLM 暴露 `get_paper_info`、`extract_sections`；没有开放外部 lookup Tool。
+- Paper Agent 结果直接复用 `AgentLoopResult`，通过 `context.metadata["paper_agent"]` 和 `agent_trace` 保留可观察信息。
+
+**Validation:**
+
+- fake LLM 已跑通 `get_paper_info -> extract_sections -> final`，共 3 次 LLM 调用、2 次 Tool 成功执行。
+- Phase 1～3 测试继续通过；未启动服务、未调用真实 LLM/网络，也未修改 `.env` 或 `storage/`。
+
+**Open questions / next steps:**
+
+- 第 5 步再将 `/api/chat` 接入 Paper Agent，并处理 session、`paper_id` 与 memory；本轮未实施。
+
+---
+
+### 2026-09-03 - 注册首批 Paper Capability Tools（第 3/6 步）
+
+**Goal:**
+
+将无需真实 LLM 或外部网络的既有论文能力封装为正式 Runtime Tool，且保持 LangGraph 固定工作流不变。
+
+**Files inspected:**
+
+- `backend/AGENTS.md`
+- `backend/docs/CODEX_STATE.md`
+- `backend/docs/CODEX_WORKLOG.md`
+- `backend/app/agents/agent_context.py`
+- `backend/app/agents/agent_loop.py`
+- `backend/app/runtime/tool_registry.py`
+- `backend/app/runtime/tool_executor.py`
+- `backend/app/agents/paper_graph.py`
+- `backend/app/agents/paper_state.py`
+- `backend/app/agents/nodes/`
+- `backend/app/services/file_service.py`
+- `backend/app/services/parser_service.py`
+- `backend/app/services/llm_service.py`
+- `backend/app/tools/paper_lookup_tools.py`
+- `backend/scripts/test_agent_loop.py`
+- `backend/scripts/test_tool_runtime.py`
+
+**Files changed:**
+
+- `backend/app/tools/paper_tools.py`：新增 `get_paper_info`、`extract_sections`、手写 LLM schema 和注册函数。
+- `backend/app/services/parser_service.py`、`backend/app/agents/nodes/pdf_parse_node.py`：抽出并复用语言对应 parser 选择能力。
+- `backend/app/agents/nodes/section_extract_node.py`：抽出 `extract_sections_from_text`，Node 改为纯 `PaperState` adapter。
+- `backend/scripts/test_paper_tools.py`：通过 Runtime 验证正式 Paper Tool、注册、schema、异常和结果序列化。
+- `backend/app/agents/agent_loop.py`：补回 Phase 2 重构时遗漏的 `json` 导入，保证 dict arguments 可写入 assistant tool-call message。
+- `backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md`：最小架构记录更新。
+
+**Commands run:**
+
+- `python3 -B -c "...ast.parse(...)"`
+- `cd backend && python3 -B -m scripts.test_paper_tools`
+- `cd backend && python3 -B -m scripts.test_tool_runtime`
+- `cd backend && python3 -B -m scripts.test_agent_loop`
+- `git diff --check`
+
+**Decisions made:**
+
+- 仅注册 `get_paper_info` 与 `extract_sections`：前者使用 parser 本地元数据，后者复用规则优先的共享章节能力；`analyze_method` 继续留在后续步骤，避免本轮调用真实 LLM。
+- Paper Tool 只接收显式 `paper_id`，不接收 `PaperState`、PDF 全文或 HTTP 请求；章节结果限制为长度、metadata 和每节最多 800 字预览。
+- 测试以 fake parsed paper 避免依赖用户 `storage/`；当前 Python 环境缺少 `pydantic`，因此未实际导入 parser adapter 或解析真实 PDF，未安装依赖。
+
+**Validation:**
+
+- Paper Tool、Tool Runtime、Agent Loop 的本地测试均通过，且 `git diff --check` 通过。
+- 未启动服务，未调用真实 LLM、外部 lookup 或 parser 服务，未修改 `.env` 或 `storage/`。
+
+**Open questions / next steps:**
+
+- 第 4 步再由 Paper Agent 根据目标和上下文选择已注册 Tool；本轮未接入 Chat/API。
+
+---
+
+### 2026-09-03 - 拆分独立 Tool Runtime（第 2/6 步）
+
+**Goal:**
+
+将第 1 步中与 Agent Loop 耦合的工具执行逻辑迁移到最小、业务无关的 Tool Runtime，保留既有 Agent Loop 调用兼容性。
+
+**Files inspected:**
+
+- `backend/AGENTS.md`
+- `backend/docs/CODEX_STATE.md`
+- `backend/docs/CODEX_WORKLOG.md`
+- `backend/app/agents/agent_context.py`
+- `backend/app/agents/agent_loop.py`
+- `backend/app/services/llm_service.py`
+- `backend/scripts/test_agent_loop.py`
+- `backend/app/tools/paper_lookup_tools.py`
+- `backend/app/agents/paper_graph.py`
+- `backend/app/agents/paper_state.py`
+
+**Files changed:**
+
+- `backend/app/runtime/__init__.py`、`tool_registry.py`、`tool_executor.py`：新增最小 registry、解析/dispatch/executor 和统一结果结构。
+- `backend/app/agents/agent_loop.py`：移除参数解析、callable 查找、执行和序列化细节，改为调用 Runtime；`tools={...}` 调用方式仍可用。
+- `backend/scripts/test_tool_runtime.py`：新增 Runtime 单独验证；保留并继续运行原 Loop 集成验证。
+- `backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md`：最小架构与工作记录更新。
+
+**Commands run:**
+
+- `python3 -B -c "...ast.parse(...)"`
+- `cd backend && python3 -B -m scripts.test_tool_runtime`
+- `cd backend && python3 -B -m scripts.test_agent_loop`
+- `rg ... backend/app/agents/agent_loop.py`
+- `git diff --check`
+
+**Decisions made:**
+
+- 未创建 `tool_context.py`：当前没有 Tool 需要运行时上下文，`AgentContext.metadata["agent_trace"]` 已足够承载轻量事件。
+- Runtime 按 LLM 返回顺序同步执行；错误使用统一 `ToolExecutionResult`，Tool 异常只暴露异常类型，避免意外回传敏感内容。
+- 未注册现有论文检索 Tool，避免本轮产生外部网络访问；仅使用本地 fake Tool 验证。
+
+**Validation:**
+
+- Runtime 单测覆盖 registry、dispatch、JSON 参数、非法参数、未知 Tool、Tool 异常、ID 保留和多 Tool 顺序。
+- Agent Loop 集成测试继续通过，且静态确认 Loop 不包含参数解析或直接 callable 执行。
+
+**Open questions / next steps:**
+
+- 第 3 步再逐步封装 PaperPilot 论文业务能力为 Runtime 可注册 Tool；本轮未实施。
+
+---
+
+### 2026-09-03 - 新增独立 Agent Loop 基础设施（第 1/6 步）
+
+**Goal:**
+
+在不接管现有 LangGraph 或 Chat API 的前提下，建立可用 fake LLM 和本地工具验证的最小 `AgentContext + Agent Loop`。
+
+**Files inspected:**
+
+- `backend/AGENTS.md`
+- `backend/docs/CODEX_STATE.md`
+- `backend/docs/CODEX_WORKLOG.md`
+- `backend/app/services/llm_service.py`
+- `backend/app/api/routes/chat.py`
+- `backend/app/agents/paper_graph.py`
+- `backend/app/agents/paper_state.py`
+- `backend/app/agents/nodes/paper_info_node.py`
+- `backend/app/tools/paper_lookup_tools.py`
+- `backend/app/core/config.py`
+
+**Files changed:**
+
+- `backend/app/agents/agent_context.py`：新增独立运行上下文，保存会话、消息、步数上限与轻量 metadata。
+- `backend/app/agents/agent_loop.py`：新增同步通用循环、最小 callable 映射执行器、结构化 tool error、max-step guard 与 trace。
+- `backend/app/services/llm_service.py`：在既有 urllib 请求路径上增加 OpenAI-compatible tool-call 标准化函数；未改变既有 text/json 调用接口。
+- `backend/scripts/test_agent_loop.py`：新增不访问网络或真实 LLM 的五项本地断言。
+
+**Commands run:**
+
+- `python3 -B -c "...ast.parse(...)"`
+- `cd backend && python3 -B -m scripts.test_agent_loop`
+- `cd backend && python3 -B -c "...run_agent(...)"`
+- `git diff --check`
+
+**Decisions made:**
+
+- 保持循环同步，以复用当前同步 `llm_service.py` 与 FastAPI/chat 调用风格；后续 Tool Runtime 可替换 `execute_tool_call`。
+- fake LLM 通过 `llm_call` 注入，正式 provider 调用仍统一经 `llm_service.call_llm_with_tools`；mock provider 不访问外部服务。
+- 未复用 `paper_info_node` 的并发 executor，因为它包含论文元数据业务和外部 lookup；本轮按要求保持通用、顺序执行。
+
+**Validation:**
+
+- AST 静态解析、五个 fake-LLM 场景和 `git diff --check` 均通过。
+- 未启动服务、未调用真实 LLM、未访问论文检索服务，未修改 storage 或 `.env`。
+
+**Open questions / next steps:**
+
+- 第 2 步再将当前 callable 映射演进为 Tool Runtime、registry、executor 与 dispatch；本轮不实施。
+
+---
+
 ### 2026-06-10 17:40 - 改造聊天界面并新增 Chat API
 
 **Goal:**

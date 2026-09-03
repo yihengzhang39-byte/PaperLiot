@@ -517,9 +517,8 @@ def format_section_debug_info(section_meta: dict[str, SectionMeta]) -> str:
     如果主要部分缺失或过短，或者没有提取到method和experiments，再用LLM提取，
     最后合并结果并生成metadata
 """
-def section_extract_node(state: PaperState) -> dict[str, object]:
-    """Extract major paper sections with rules first and LLM fallback if needed."""
-    raw_text = state.get("raw_text", "")
+def extract_sections_from_text(raw_text: str, existing_abstract: str = "") -> dict[str, object]:
+    """Extract major paper sections from text with rules first and LLM fallback."""
     rule_sections, rule_meta = extract_sections_by_rules_with_meta(raw_text)
     needs_llm = (
         not rule_sections.get("method")
@@ -540,7 +539,7 @@ def section_extract_node(state: PaperState) -> dict[str, object]:
         rule_sections,
         rule_meta,
         llm_sections,
-        state.get("abstract", ""),
+        existing_abstract,
     )
     if llm_warning:
         for key in SECTION_KEYS:
@@ -551,3 +550,8 @@ def section_extract_node(state: PaperState) -> dict[str, object]:
         **merged,
         "section_meta": section_meta,
     }
+
+
+def section_extract_node(state: PaperState) -> dict[str, object]:
+    """Adapt shared section extraction capability to PaperState."""
+    return extract_sections_from_text(state.get("raw_text", ""), state.get("abstract", ""))

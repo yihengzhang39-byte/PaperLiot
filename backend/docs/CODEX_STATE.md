@@ -4,21 +4,22 @@
 
 PaperPilot 是一个科研论文阅读 Agent 后端项目，当前目标是完成“单篇 PDF 论文 -> 文本解析 -> 元数据抽取 -> 章节抽取/验证/修复 -> 方法与实验分析 -> 中文 Markdown 精读笔记”的后端闭环。
 
-项目目前位于 `backend/`，是 Python FastAPI 服务，没有发现独立前端构建配置。README 明确提到后续计划包括 MySQL、任务状态、异步队列、前端、多论文对比和 Related Work 生成，但当前实现仍以本地文件存储和单篇论文分析为主。
+项目目前位于 `backend/`，是 Python FastAPI 服务，没有发现独立前端构建配置。固定 LangGraph 仍以单篇论文分析为主；交互式 Paper Agent 已具备本地检索、JSON 会话持久化、受控 memory 写回和多论文检索上下文基础。
 
 ## Current Architecture
 
 - Web 层：`app/main.py` 创建 FastAPI app，注册 CORS 和 `/api/papers` 路由，并提供 `/health`。
 - Static 层：`backend/static/index.html` 是单文件 ChatGPT 风格浏览器前端；`app/main.py` 使用 FastAPI `StaticFiles` 将 `backend/static/` 挂载到 `/static`，并通过 `GET /` 返回 `index.html`。
 - API 层：`app/api/routes/paper.py` 提供 PDF 上传、按 `paper_id` 分析、读取生成笔记三类接口。
-- Chat 层：`app/api/routes/chat.py` 提供 `POST /api/chat`，按 `session_id` 在进程内维护对话历史，并复用 `llm_service.call_llm_text` 调用真实 LLM；mock 模式返回本地占位回复。
-- Memory 层：`backend/memory/soul.md`、`backend/memory/user.md`、`backend/memory/memory.md` 在 chat 路由模块启动时读取并注入 system prompt；读取失败静默降级。
-- Agent 层：`app/agents/paper_graph.py` 使用 LangGraph 串联节点，状态定义在 `app/agents/paper_state.py`。
+- Chat 层：`app/api/routes/chat.py` 通过安全 JSON session 持久化语义历史、当前 `paper_id` 和 `active_paper_ids`；`POST /api/chat/stream` 用 SSE 转发同一 Agent Loop 的安全运行时事件和真实 LLM delta，完成后才持久化 final turn。
+- Memory 层：每轮 Paper Agent 从 `soul.md`、`user.md`、`memory.md` 读取上下文；仅 `memory.md` 可由受控、去重的 Tool 写回，读取失败静默降级。
+- Agent 层：`app/agents/paper_graph.py` 使用 LangGraph 串联固定分析节点，状态定义在 `app/agents/paper_state.py`；`app/agents/paper_agent.py` 是 Chat 真实 provider 路径使用的 Paper Tool Agent 入口。
+- Agent Runtime 层：`app/runtime/` 提供独立的 Tool Registry 和同步 Tool Executor，供 Paper Agent 的真实 provider 路径调用。
 - 节点层：`app/agents/nodes/` 包含 PDF 解析、策略规划、论文信息抽取、章节抽取、章节校验、章节修复、方法分析、实验分析、笔记写作等节点。
-- 服务层：`app/services/` 负责本地文件存储、PDF parser 选择与 fallback、LLM 调用、论文外部元数据查询。
+- 服务层：`app/services/` 负责本地文件存储、PDF parser 选择与 fallback、LLM 调用、论文外部元数据查询、lexical retrieval、session 持久化和受控 memory 写回。
 - Parser adapter：`app/services/parsers/` 已有 `pymupdf`、`grobid`、`docling`、`marker`、`mineru` 适配器；README 标注 PyMuPDF 默认可用，GROBID 依赖本地服务，其他 adapter 偏实验/预留。
-- Tool 层：`app/tools/paper_lookup_tools.py` 暴露 arXiv、Crossref、OpenAlex 查询工具，供论文信息补全逻辑使用。
-- 存储层：`storage/` 下保存上传 PDF、生成笔记、论文 metadata 和章节 JSON。
+- Tool 层：`app/tools/paper_tools.py` 暴露本地论文信息、章节和 retrieval；`memory_tools.py` 暴露唯一的 memory 写入能力；`multi_paper_tools.py` 暴露来源可追踪的多论文 context。
+- 存储层：`storage/` 下保存上传 PDF、生成笔记、论文 metadata、章节 JSON、paper chunk JSON 与 chat session JSON。
 
 当前 LangGraph 流程：
 
@@ -39,6 +40,7 @@ pdf_parse_node
 - `backend/app/`：后端应用主体。
 - `backend/app/api/routes/`：HTTP API 路由。
 - `backend/app/agents/`：LangGraph workflow、state 和节点。
+- `backend/app/runtime/`：独立 Agent Tool Runtime，包括 registry、dispatch 与 executor。
 - `backend/app/services/`：文件、parser、LLM、lookup 等服务。
 - `backend/app/services/parsers/`：PDF parser adapter。
 - `backend/app/tools/`：可复用工具函数，当前主要是论文元数据查询。
@@ -56,15 +58,24 @@ pdf_parse_node
 - `backend/requirements.txt`：依赖清单：FastAPI、uvicorn、python-multipart、pydantic、langgraph、PyMuPDF、python-dotenv、requests、langchain-core。
 - `backend/app/main.py`：FastAPI 入口。
 - `backend/app/core/config.py`：`.env` 读取、LLM/PDF parser/lookup/section repair/plan agent 配置、存储目录常量。
-- `backend/app/api/routes/paper.py`：`POST /upload`、`POST /{paper_id}/analyze`、`GET /{paper_id}/note`。
-- `backend/app/api/routes/chat.py`：`POST /api/chat`，接收 `message/session_id`，加载 memory 文件，维护内存会话历史并调用 LLM。
+- `backend/app/api/routes/paper.py`：`POST /upload`、`DELETE /{paper_id}`、`POST /{paper_id}/analyze`、`GET /{paper_id}/note`。
+- `backend/app/api/routes/chat.py`：兼容的 `POST /api/chat` 及 `POST /api/chat/stream`；后者通过 SSE 输出 Agent Step、Tool 摘要和 final delta，并只在 final answer 后保存 session turn。
 - `backend/app/agents/paper_graph.py`：LangGraph 编排和 `analyze_paper` 入口。
 - `backend/app/agents/paper_state.py`：跨节点共享状态字段。
-- `backend/app/services/file_service.py`：上传 PDF 保存、metadata/note/section JSON 读写。
+- `backend/app/agents/agent_context.py`、`backend/app/agents/agent_loop.py`：独立 Agent Loop 的会话控制、LLM/tool 调用循环和统一 runtime event sink；普通/流式模式复用同一循环。
+- `backend/app/agents/paper_agent.py`：组装一个 system prompt、历史 user/assistant 消息、`paper_id` 上下文和 Paper Tool Registry/schema，并复用通用 Agent Loop。
+- `backend/app/runtime/tool_registry.py`、`backend/app/runtime/tool_executor.py`：独立 Tool Runtime，负责精确查找、参数解析、dispatch、结果归一化及 HTTP 无关的 tool start/result 事件。
+- `backend/app/tools/paper_tools.py`：以 `paper_id` 为资源句柄的正式 Paper Tool 注册、schema 和薄适配层，供 Chat Paper Agent 使用。
+- `backend/app/services/file_service.py`：上传 PDF 保存、metadata/note/section JSON 读写及按生成 `paper_id` 删除关联本地文件。
 - `backend/app/services/parser_service.py`：parser registry 与 fallback 到 PyMuPDF。
-- `backend/app/services/llm_service.py`：mock provider、真实 OpenAI-compatible chat completions、JSON 清洗解析。
+- `backend/app/services/llm_service.py`：mock provider、真实 OpenAI-compatible chat completions、JSON 清洗解析和 SSE content/tool-call delta 解析。
+- `backend/app/services/retrieval_service.py`：section-aware chunk、JSON index 与纯 Python lexical retrieval。
+- `backend/app/services/session_service.py`：哈希文件名的 JSON session load/save 与语义历史裁剪。
+- `backend/app/services/memory_service.py`：仅固定 `memory.md` 的受控、去重写回。
+- `backend/app/tools/memory_tools.py`、`backend/app/tools/multi_paper_tools.py`：memory 和多论文 Agent Tool 注册。
 - `backend/scripts/run_analyze_paper.py`：CLI 分析单个 PDF。
-- `backend/static/index.html`：浏览器前端入口，提供 ChatGPT 风格对话、内存会话历史、PDF 上传自动分析、Markdown 消息渲染、loading 和错误提示。
+- `backend/static/index.html`：浏览器前端入口，提供 ChatGPT 风格对话、内存会话历史、待发送 PDF 附件、SSE execution activity、final delta Markdown 渲染和错误提示。
+- `backend/scripts/test_retrieval.py`、`test_session_persistence.py`、`test_memory_service.py`、`test_multi_paper.py`：Phase 6 四个独立的纯本地验证脚本。
 - `backend/memory/soul.md`：聊天助手性格和论文分析偏好。
 - `backend/memory/user.md`：用户身份、研究兴趣、技术背景和摘要偏好。
 - `backend/memory/memory.md`：已分析论文、关注主题和跨论文发现的长期记忆占位。
@@ -87,9 +98,14 @@ pdf_parse_node
 
 - 上传 PDF 并生成 `paper_id`。
 - 支持浏览器前端访问：`GET /` 返回单文件 HTML 界面，`/static` 提供静态文件。
-- 单文件 HTML 前端支持 ChatGPT 风格对话、前端内存历史、新建对话、PDF 上传、自动分析、查看 Markdown 精读笔记、loading 状态和错误提示。
-- 支持 `POST /api/chat` 对话接口，按 `session_id` 维护进程内对话历史。
-- 支持在 chat system prompt 中注入 `backend/memory/` 下的长期记忆；读取失败不影响正常对话。
+- 单文件 HTML 前端支持 ChatGPT 风格对话、前端内存历史、新建对话和待发送 PDF 附件；上传只保存为当前输入框的 pending attachment，不写入聊天消息、不调用 Agent，用户点击发送后才把 `message/session_id/paper_id` 交给动态 Agent 路径。
+- pending PDF 附件可通过 `DELETE /api/papers/{paper_id}` 取消；仅删除该 ID 的 PDF、metadata、note、chunk index 和 `paper_id` 匹配的 section JSON。
+- 支持 `POST /api/chat` 对话接口；请求可选传入 `paper_id`，否则继承 session 当前论文；JSON session 在重启后恢复并只保存 user/final assistant 历史。
+- 支持 `POST /api/chat/stream` SSE；同一 Agent Loop 发送 `agent_start`、step/LLM、tool、final delta、done/error 事件，前端只显示安全 Tool 摘要和 final answer，不显示模型 reasoning 或完整 Tool payload。
+- 真实 LLM provider 的 Chat 经 `Paper Agent -> Agent Loop -> Tool Runtime -> Paper/Retrieval/Memory/Multi-paper Tools` 执行；mock provider 不进入该链路且不访问外部服务。
+- 支持 section-aware chunk 和本地 JSON index 的 lexical retrieval，返回 top-k 有来源标记的 chunk，不返回全文。
+- 支持每轮在 Paper Agent system prompt 中读取 `backend/memory/`；仅显式调用 `save_research_memory` 才会写入 `memory.md`，并有固定分类与去重。
+- 同一 session 可积累 `active_paper_ids`；`get_multi_paper_context` 分别返回各论文的 retrieval 结果和错误状态。
 - 记录上传文件 metadata，包括 `paper_language`。
 - 按 `paper_id` 找到本地 PDF 并运行 LangGraph 分析。
 - 使用 PyMuPDF 解析 PDF 文本；GROBID/Docling/Marker/MinerU adapter 已在 registry 中，但可用性取决于环境和外部服务/依赖。
@@ -104,10 +120,11 @@ pdf_parse_node
 
 ## Known Constraints
 
-- 当前只支持单篇论文精读。
-- 长论文仍主要依赖截断和计划标记；README 标注 chunk/RAG 尚未真正执行。
+- 固定 LangGraph 流程仍是单篇论文精读；多论文能力仅覆盖交互式检索上下文，不会自动生成 Related Work。
+- RAG 是无 embedding、无向量库的纯 Python lexical retrieval；固定 LangGraph 不会自动调用它。
 - MySQL、任务状态、异步队列和完整前端工程尚未实现；当前只有无需构建的单文件 HTML 聊天前端。
-- 对话历史只保存在后端进程内存和前端内存中，服务重启或页面刷新后不会持久化。
+- 会话持久化为本地 JSON，默认仅保留最近 20 条语义消息；没有 LLM history summary、数据库或多进程并发控制。
+- 当前 client disconnect 不会中断正在进行的一次 provider HTTP 调用；stream generator 使用无界队列和 daemon worker 安全退出，后续如需“停止生成”应加入显式取消 token。
 - 测试体系待确认，当前未发现专门 `tests/` 目录。
 - 格式化/lint 配置待确认，当前未发现 `pyproject.toml` 或专用配置文件。
 - Playwright/浏览器自动化未在后端文件清单中发现；如后续涉及浏览器自动化，先检查再安装。
@@ -123,7 +140,7 @@ pdf_parse_node
 - 待确认：真实 LLM provider 的推荐配置、模型名称和网络访问策略。
 - 待确认：是否需要 `.gitignore` 忽略 `storage/`、`__pycache__/`、uvicorn 日志、`.env` 等生成/敏感文件；本次任务未修改配置文件。
 - 待确认：是否需要补充正式测试覆盖，包括 parser fallback、章节抽取、API schema、file_service 存储行为。
-- README 已标注后续计划：MySQL、任务状态、异步队列、多论文对比、Related Work 生成、Vue 前端。
+- README 已标注后续计划：MySQL、任务状态、异步队列、生产级多论文对比、Related Work 生成、Vue 前端。
 
 ## User Preferences
 
@@ -137,12 +154,11 @@ pdf_parse_node
 
 ## Last Verified State
 
-- 验证日期：2026-06-10 17:40 +08:00。
+- 验证日期：2026-09-03 15:55 +08:00。
 - 当前检查范围：只读查看 `backend/` 文件清单、README、requirements、入口、路由、配置、LangGraph、state、file/parser/LLM service、schema、CLI 脚本、静态前端文件、chat 路由、memory 文件和 git diff/stat。
 - 本次聊天前端改造后，已静态确认 `backend/static/index.html` 存在，并包含 Tailwind CDN、marked.js、highlight.js、`/api/chat`、`/api/papers/upload`、`/api/papers/{paper_id}/analyze`、`/api/papers/{paper_id}/note` 调用；`backend/app/main.py` 包含 `chat_router` 注册、`StaticFiles`、`app.mount("/static", ...)` 和 `GET /` 根路由。
-- `backend/app/api/routes/chat.py` 已新增，包含 `ChatRequest`、`ChatResponse`、`SESSION_HISTORY`、memory 文件读取、mock 回复和真实 LLM 调用路径；`backend/memory/` 三个文件已创建。
-- Python AST 语法检查尝试执行时，当前沙箱返回 `windows sandbox: spawn setup refresh`，未完成运行时语法验证；未启动服务、未调用上传/分析/chat/真实 LLM。
-- Python AST 语法检查和本地 health check 尝试执行时，当前沙箱返回 `windows sandbox: spawn setup refresh`；后台启动 uvicorn 的尝试被审批策略拒绝，因为属于长期服务启动。未完成浏览器运行时验证，未调用上传/分析接口。
+- Phase 1～6 全部本地脚本和新增 `test_agent_streaming` 均已通过，`git diff --check` 通过；未启动服务、未调用上传/分析/chat/真实 LLM。
+- 系统 Python 环境缺少 FastAPI/Pydantic，但 `backend/.venv` 已安装 FastAPI；Chat 集成仍以最小 stub 直接调用 route function，未使用 TestClient。
 - `backend/AGENTS.md`、`backend/docs/CODEX_STATE.md`、`backend/docs/CODEX_WORKLOG.md` 在本次任务前为空文件或无可见内容。
 - `git status --short` 显示工作区已有大量未提交变更，包括 `.env`、`.env.example`、README、业务代码、`__pycache__`、storage 数据和 uvicorn 日志删除；本次任务不应回滚或整理这些变更。
 - `git log --oneline -n 20` 曾尝试执行但当前沙箱返回 `windows sandbox: spawn setup refresh`，未能读取历史提交；历史工作从当前仓库无法确认。

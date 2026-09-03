@@ -42,6 +42,7 @@ backend/
 cd backend
 python -m venv .venv
 .venv\Scripts\activate
+source .venv/bin/activate # linux环境下
 pip install -r requirements.txt
 ```
 

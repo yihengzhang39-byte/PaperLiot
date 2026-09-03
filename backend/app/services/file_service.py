@@ -10,6 +10,7 @@ from fastapi import UploadFile
 
 from app.core.config import (
     NOTES_DIR,
+    PAPER_CHUNKS_DIR,
     PAPER_METADATA_DIR,
     PAPER_SECTION_JSON_DIR,
     PAPERS_DIR,
@@ -116,6 +117,35 @@ def find_paper_pdf(paper_id: str) -> Path | None:
 
     matches = sorted(PAPERS_DIR.glob(f"{paper_id}_*.pdf"))
     return matches[0] if matches else None
+
+
+def delete_paper_data(paper_id: str) -> bool:
+    """Delete local files owned by one generated paper id."""
+    if not re.fullmatch(r"[0-9a-f]{32}", paper_id):
+        raise ValueError("paper_id must be a generated 32-character hexadecimal id")
+
+    paths = [
+        PAPERS_DIR / f"{paper_id}.pdf",
+        *PAPERS_DIR.glob(f"{paper_id}_*.pdf"),
+        NOTES_DIR / f"{paper_id}.md",
+        PAPER_METADATA_DIR / f"{paper_id}.json",
+        PAPER_CHUNKS_DIR / f"{paper_id}.json",
+    ]
+    deleted = False
+    for path in paths:
+        if path.is_file():
+            path.unlink()
+            deleted = True
+
+    for path in PAPER_SECTION_JSON_DIR.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("paper_id") == paper_id:
+            path.unlink()
+            deleted = True
+    return deleted
 
 
 def write_text_file(path: Path, content: str) -> None:

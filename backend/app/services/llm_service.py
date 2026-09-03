@@ -2,11 +2,48 @@
 
 import json
 import re
+from dataclasses import dataclass
+from collections.abc import Iterator
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from app.core.config import LLMConfig, get_llm_config
+
+
+@dataclass(frozen=True)
+class AgentToolCall:
+    """Provider-neutral function call returned by an LLM."""
+
+    id: str
+    name: str
+    arguments: str | dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AgentLLMResponse:
+    """Minimal response shape used by the generic agent loop."""
+
+    content: str
+    tool_calls: list[AgentToolCall]
+
+
+@dataclass(frozen=True)
+class AgentToolCallDelta:
+    """One OpenAI-compatible streamed tool-call fragment."""
+
+    index: int
+    id: str = ""
+    name: str = ""
+    arguments_delta: str = ""
+
+
+@dataclass(frozen=True)
+class AgentLLMDelta:
+    """Provider-neutral streamed LLM content and tool-call fragments."""
+
+    content: str = ""
+    tool_calls: list[AgentToolCallDelta] | None = None
 
 
 """
@@ -80,6 +117,16 @@ def _chat_completion(system_prompt: str, user_prompt: str, *, expect_json: bool)
     if expect_json:
         body["response_format"] = {"type": "json_object"}
 
+    message = _request_chat_completion(body, config)
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("LLM returned an empty message.")
+    return content
+
+
+def _request_chat_completion(body: dict[str, Any], config: LLMConfig) -> dict[str, Any]:
+    """Send one OpenAI-compatible chat completion request and return its message."""
+
     request = Request(
         url=f"{config.base_url}/chat/completions",
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -104,13 +151,12 @@ def _chat_completion(system_prompt: str, user_prompt: str, *, expect_json: bool)
         raise RuntimeError(f"LLM provider returned invalid response JSON: {exc}") from exc
 
     try:
-        content = payload["choices"][0]["message"]["content"]
+        message = payload["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"Unexpected LLM response shape: {payload}") from exc
-
-    if not isinstance(content, str) or not content.strip():
-        raise RuntimeError("LLM returned an empty message.")
-    return content
+    if not isinstance(message, dict):
+        raise RuntimeError(f"Unexpected LLM message shape: {message}")
+    return message
 
 
 def _validate_real_llm_config(config: LLMConfig) -> None:
@@ -134,6 +180,144 @@ def call_llm_json(system_prompt: str, user_prompt: str) -> dict[str, Any]:
     """Call the configured real LLM and parse a JSON object response."""
     content = _chat_completion(system_prompt, user_prompt, expect_json=True)
     return _parse_json_response(content)
+
+
+def call_llm_with_tools(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+) -> AgentLLMResponse:
+    """Call the configured provider with OpenAI-compatible tool definitions."""
+    config = get_llm_config()
+    if config.provider == "mock":
+        return AgentLLMResponse(
+            content="当前处于 mock 模式，未执行工具调用。",
+            tool_calls=[],
+        )
+
+    _validate_real_llm_config(config)
+    message = _request_chat_completion(
+        {
+            "model": config.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": config.temperature,
+        },
+        config,
+    )
+    tool_calls: list[AgentToolCall] = []
+    for index, tool_call in enumerate(message.get("tool_calls") or []):
+        if not isinstance(tool_call, dict):
+            continue
+        function = tool_call.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        arguments = function.get("arguments", "{}")
+        if not isinstance(arguments, (str, dict)):
+            arguments = "{}"
+        tool_calls.append(
+            AgentToolCall(
+                id=str(tool_call.get("id") or f"call_{index + 1}"),
+                name=name,
+                arguments=arguments,
+            )
+        )
+
+    content = message.get("content")
+    return AgentLLMResponse(content=content if isinstance(content, str) else "", tool_calls=tool_calls)
+
+
+def _tool_call_deltas(value: Any) -> list[AgentToolCallDelta]:
+    """Normalize streamed OpenAI-compatible tool-call fragments."""
+    if not isinstance(value, list):
+        return []
+    deltas: list[AgentToolCallDelta] = []
+    for position, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index", position)
+        if not isinstance(index, int):
+            continue
+        function = item.get("function")
+        function = function if isinstance(function, dict) else {}
+        name = function.get("name", "")
+        arguments = function.get("arguments", "")
+        deltas.append(
+            AgentToolCallDelta(
+                index=index,
+                id=str(item.get("id") or ""),
+                name=name if isinstance(name, str) else "",
+                arguments_delta=arguments if isinstance(arguments, str) else "",
+            )
+        )
+    return deltas
+
+
+def _stream_chat_completion(body: dict[str, Any], config: LLMConfig) -> Iterator[AgentLLMDelta]:
+    """Yield real OpenAI-compatible SSE deltas without buffering the answer."""
+    body = {**body, "stream": True}
+    request = Request(
+        url=f"{config.base_url}/chat/completions",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=config.timeout) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload_text = line[5:].strip()
+                if payload_text == "[DONE]":
+                    return
+                try:
+                    payload = json.loads(payload_text)
+                    delta = payload["choices"][0]["delta"]
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+                    raise RuntimeError("LLM streaming response contained an invalid SSE event.") from exc
+                if not isinstance(delta, dict):
+                    continue
+                content = delta.get("content")
+                tool_calls = _tool_call_deltas(delta.get("tool_calls"))
+                if isinstance(content, str) or tool_calls:
+                    yield AgentLLMDelta(content=content if isinstance(content, str) else "", tool_calls=tool_calls)
+    except HTTPError as exc:
+        raise RuntimeError(f"LLM HTTP error {exc.code}.") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Failed to connect to LLM provider: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"LLM request timed out after {config.timeout} seconds.") from exc
+
+
+def call_llm_with_tools_stream(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+) -> Iterator[AgentLLMDelta]:
+    """Yield native provider deltas for one tool-capable LLM turn."""
+    config = get_llm_config()
+    if config.provider == "mock":
+        yield AgentLLMDelta(content="当前处于 mock 模式，未执行工具调用。")
+        return
+
+    _validate_real_llm_config(config)
+    yield from _stream_chat_completion(
+        {
+            "model": config.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": config.temperature,
+        },
+        config,
+    )
 
 
 def mock_extract_paper_info(text: str) -> dict[str, object]:

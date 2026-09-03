@@ -5,6 +5,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from app.agents.paper_graph import analyze_paper
 from app.core.config import get_llm_config
 from app.services.file_service import (
+    delete_paper_data,
     find_paper_pdf,
     normalize_paper_language,
     read_paper_metadata,
@@ -37,6 +38,18 @@ def upload_paper(
         return save_upload_pdf(file, normalize_paper_language(paper_language))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to save PDF: {exc}") from exc
+
+
+@router.delete("/{paper_id}")
+def delete_uploaded_paper(paper_id: str) -> dict[str, object]:
+    """Delete one uploaded paper and its paper-id-bound local artifacts."""
+    try:
+        deleted = delete_paper_data(paper_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="PDF not found for this paper_id.") from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="PDF not found for this paper_id.")
+    return {"paper_id": paper_id, "deleted": True}
 
 
 @router.post("/{paper_id}/analyze", response_model=PaperAnalyzeResponse)

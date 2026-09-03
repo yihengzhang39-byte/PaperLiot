@@ -214,7 +214,7 @@ def _score_paper_types(
 
 
 def _document_size_strategy_from_length(raw_text_length: int, page_count: int | None) -> dict[str, object]:
-    """Plan for large document handling without implementing chunk/RAG."""
+    """Plan large-document handling for the fixed workflow without invoking retrieval."""
     if raw_text_length >= 120000 or (page_count is not None and page_count > 50):
         size_level = "huge"
     elif raw_text_length >= 40000:
@@ -229,7 +229,7 @@ def _document_size_strategy_from_length(raw_text_length: int, page_count: int | 
         "page_count": page_count,
         "use_chunking": use_chunking,
         "use_rag": use_chunking,
-        "reason": "Large document strategy is planned only; chunking/RAG is not implemented in this round."
+        "reason": "Fixed LangGraph analysis records the large-document strategy; interactive Paper Agent retrieval is separate."
         if use_chunking
         else "Document size is normal; current direct workflow is acceptable.",
     }

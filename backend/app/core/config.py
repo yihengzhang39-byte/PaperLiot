@@ -16,6 +16,8 @@ PAPERS_DIR = STORAGE_DIR / "papers"
 NOTES_DIR = STORAGE_DIR / "notes"
 PAPER_SECTION_JSON_DIR = STORAGE_DIR / "paper_section_json"
 PAPER_METADATA_DIR = STORAGE_DIR / "paper_metadata"
+PAPER_CHUNKS_DIR = STORAGE_DIR / "paper_chunks"
+CHAT_SESSIONS_DIR = STORAGE_DIR / "chat_sessions"
 
 if load_dotenv is not None:
     load_dotenv(BASE_DIR / ".env")
@@ -67,6 +69,22 @@ class PlanAgentConfig:
     llm_enabled: bool = False
     max_input_chars: int = 3000
     confidence_threshold: float = 0.7
+
+
+@dataclass(frozen=True)
+class RAGConfig:
+    """Local lexical-retrieval settings."""
+
+    chunk_size: int = 1200
+    chunk_overlap: int = 200
+    top_k: int = 3
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """Bounded local-chat history settings."""
+
+    max_history_messages: int = 20
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -161,6 +179,22 @@ def get_plan_agent_config() -> PlanAgentConfig:
     )
 
 
+def get_rag_config() -> RAGConfig:
+    """Read bounded local-retrieval settings from environment variables."""
+    chunk_size = max(_get_int_env("RAG_CHUNK_SIZE", 1200), 100)
+    chunk_overlap = min(max(_get_int_env("RAG_CHUNK_OVERLAP", 200), 0), chunk_size - 1)
+    return RAGConfig(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        top_k=max(_get_int_env("RAG_TOP_K", 3), 1),
+    )
+
+
+def get_session_config() -> SessionConfig:
+    """Read the number of semantic messages kept for each local session."""
+    return SessionConfig(max_history_messages=max(_get_int_env("CHAT_HISTORY_MAX_MESSAGES", 20), 1))
+
+
 LLM_PROVIDER = get_llm_config().provider
 LLM_API_KEY = get_llm_config().api_key
 LLM_BASE_URL = get_llm_config().base_url
@@ -183,6 +217,10 @@ SECTION_REPAIR_MAX_ROUNDS = get_section_repair_config().max_rounds
 PLAN_AGENT_LLM_ENABLED = get_plan_agent_config().llm_enabled
 PLAN_AGENT_MAX_INPUT_CHARS = get_plan_agent_config().max_input_chars
 PLAN_AGENT_CONFIDENCE_THRESHOLD = get_plan_agent_config().confidence_threshold
+RAG_CHUNK_SIZE = get_rag_config().chunk_size
+RAG_CHUNK_OVERLAP = get_rag_config().chunk_overlap
+RAG_TOP_K = get_rag_config().top_k
+CHAT_HISTORY_MAX_MESSAGES = get_session_config().max_history_messages
 
 
 """
@@ -194,3 +232,5 @@ def ensure_storage_dirs() -> None:
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
     PAPER_SECTION_JSON_DIR.mkdir(parents=True, exist_ok=True)
     PAPER_METADATA_DIR.mkdir(parents=True, exist_ok=True)
+    PAPER_CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+    CHAT_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
