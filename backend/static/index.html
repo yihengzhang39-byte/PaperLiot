@@ -30,6 +30,11 @@
     .session-delete-button:active { transform: scale(.92); }
     .session-delete-tooltip { position: absolute; top: 50%; right: calc(100% + 8px); z-index: 10; border: 1px solid rgba(255, 255, 255, .12); border-radius: .375rem; background: #111827; box-shadow: 0 6px 16px rgba(0, 0, 0, .25); color: #e5e7eb; font-size: .75rem; line-height: 1; opacity: 0; padding: .35rem .5rem; pointer-events: none; transform: translate(2px, -50%); transition: opacity .14s ease, transform .14s ease; white-space: nowrap; }
     .session-delete-button:hover .session-delete-tooltip, .session-delete-button:focus-visible .session-delete-tooltip { opacity: 1; transform: translate(0, -50%); }
+    .trace-scrollbar::-webkit-scrollbar { width: 7px; height: 7px; }
+    .trace-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+    @media (max-width: 767px) {
+      #turnInspector { position: fixed; inset: 0 0 0 auto; z-index: 50; width: min(94vw, 430px); box-shadow: -16px 0 40px rgba(15, 23, 42, .35); }
+    }
   </style>
 </head>
 <body class="h-screen overflow-hidden bg-white text-slate-900">
@@ -122,6 +127,17 @@
         <input id="pdfInput" class="hidden" type="file" accept="application/pdf,.pdf">
       </footer>
     </main>
+
+    <aside id="turnInspector" class="trace-scrollbar hidden h-full w-[420px] shrink-0 overflow-y-auto border-l border-slate-200 bg-white text-slate-900" aria-label="Harness Inspector">
+      <div class="sticky top-0 z-10 flex items-start justify-between border-b border-slate-200 bg-white px-4 py-4">
+        <div class="min-w-0">
+          <div class="text-sm font-semibold tracking-wide text-slate-900">Harness Inspector</div>
+          <div id="turnInspectorMeta" class="mt-1 truncate text-xs text-slate-500"></div>
+        </div>
+        <button id="closeTurnInspectorButton" type="button" aria-label="关闭轨迹检查器" class="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-900">×</button>
+      </div>
+      <div id="turnInspectorContent" class="space-y-3 p-4"></div>
+    </aside>
   </div>
 
   <script>
@@ -147,10 +163,16 @@
     const pendingAttachmentWrap = document.getElementById("pendingAttachmentWrap");
     const pendingAttachmentName = document.getElementById("pendingAttachmentName");
     const removePendingAttachmentButton = document.getElementById("removePendingAttachmentButton");
+    const turnInspector = document.getElementById("turnInspector");
+    const turnInspectorMeta = document.getElementById("turnInspectorMeta");
+    const turnInspectorContent = document.getElementById("turnInspectorContent");
+    const closeTurnInspectorButton = document.getElementById("closeTurnInspectorButton");
 
     let conversations = [];
     let activeSessionId = "";
     let isGenerating = false;
+    let inspectorSessionId = "";
+    let inspectorTurnId = "";
     const CURRENT_SESSION_STORAGE_KEY = "paperpilot_current_session_id";
 
     marked.setOptions({
@@ -278,7 +300,7 @@
 
       const bubble = document.createElement("div");
       bubble.className = isUser
-        ? "max-w-[78%] rounded-2xl rounded-tr-sm bg-blue-600 px-4 py-3 text-sm leading-6 text-white shadow-sm"
+        ? "max-w-full rounded-2xl rounded-tr-sm bg-blue-600 px-4 py-3 text-sm leading-6 text-white shadow-sm"
         : "markdown-body max-w-[84%] rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-800 shadow-sm";
 
       if (isUser) {
@@ -379,7 +401,19 @@
       }
 
       if (isUser) {
-        row.appendChild(bubble);
+        const userStack = document.createElement("div");
+        userStack.className = "flex w-fit max-w-[78%] flex-col items-end gap-1";
+        userStack.appendChild(bubble);
+        if (message.sessionId && message.turnId) {
+          const traceButton = document.createElement("button");
+          traceButton.type = "button";
+          traceButton.className = "rounded-md border border-blue-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-blue-700 shadow-sm transition hover:border-blue-500 hover:bg-blue-50 hover:text-blue-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300";
+          traceButton.textContent = "◌ 轨迹";
+          traceButton.setAttribute("aria-label", "查看此消息的执行轨迹");
+          traceButton.addEventListener("click", () => openTurnInspector(message.sessionId, message.turnId));
+          userStack.appendChild(traceButton);
+        }
+        row.appendChild(userStack);
         row.appendChild(avatar);
       } else {
         row.appendChild(avatar);
@@ -404,6 +438,196 @@
       }[char]));
     }
 
+    function traceElement(tag, className = "", text = "") {
+      const element = document.createElement(tag);
+      element.className = className;
+      if (text) {
+        element.textContent = text;
+      }
+      return element;
+    }
+
+    function formatTraceJson(value) {
+      try {
+        return JSON.stringify(value ?? null, null, 2);
+      } catch {
+        return String(value ?? "");
+      }
+    }
+
+    function tracePre(value) {
+      const pre = traceElement("pre", "trace-scrollbar mt-2 max-h-72 overflow-auto rounded-md border border-slate-200 bg-slate-50 p-3 text-[11px] leading-5 text-slate-800");
+      pre.textContent = typeof value === "string" ? value : formatTraceJson(value);
+      return pre;
+    }
+
+    function traceDetails(title, open = false) {
+      const details = traceElement("details", "rounded-lg border border-slate-200 bg-white");
+      details.open = open;
+      const summary = traceElement("summary", "cursor-pointer select-none px-3 py-2 text-xs font-semibold text-slate-700 marker:text-slate-400", title);
+      details.appendChild(summary);
+      const body = traceElement("div", "border-t border-slate-200 px-3 py-3");
+      details.appendChild(body);
+      return { details, body };
+    }
+
+    function traceLabel(text, tone = "slate") {
+      const tones = {
+        slate: "border-slate-300 bg-slate-100 text-slate-600",
+        blue: "border-blue-200 bg-blue-50 text-blue-700",
+        green: "border-emerald-200 bg-emerald-50 text-emerald-700",
+        rose: "border-rose-200 bg-rose-50 text-rose-700",
+        amber: "border-amber-200 bg-amber-50 text-amber-700"
+      };
+      return traceElement("span", `inline-flex rounded border px-1.5 py-0.5 text-[10px] font-medium ${tones[tone] || tones.slate}`, text);
+    }
+
+    function formatTraceSize(value) {
+      const size = Number(value);
+      if (!Number.isFinite(size)) {
+        return "未知";
+      }
+      return size >= 1000 ? `${(size / 1000).toFixed(size >= 10000 ? 1 : 2)}K chars` : `${size} chars`;
+    }
+
+    function renderTraceMessage(message) {
+      const details = traceDetails(`Message ${message.index ?? "?"} · ${String(message.role || "unknown").toUpperCase()}`, message.role !== "system");
+      const meta = traceElement("div", "flex flex-wrap items-center gap-2 text-[11px] text-slate-500");
+      meta.append(traceLabel(`origin: ${message.origin || "unknown"}`, "blue"), traceElement("span", "", `${message.content_length ?? 0} chars`));
+      details.body.appendChild(meta);
+      const sources = message.origin_metadata?.sources;
+      if (Array.isArray(sources) && sources.length) {
+        details.body.appendChild(traceElement("div", "mt-2 text-[11px] text-slate-500", `Sources: ${sources.join(", ")}`));
+      }
+      if (message.tool_call_id || message.name) {
+        details.body.appendChild(traceElement("div", "mt-2 text-[11px] text-slate-500", `tool_call_id: ${message.tool_call_id || "—"}${message.name ? ` · ${message.name}` : ""}`));
+      }
+      details.body.appendChild(tracePre(message.content || ""));
+      if (message.tool_calls) {
+        details.body.appendChild(traceElement("div", "mt-3 text-[11px] font-medium text-slate-700", "Tool Calls"));
+        details.body.appendChild(tracePre(message.tool_calls));
+      }
+      return details.details;
+    }
+
+    function renderLlmCall(call) {
+      const wrapper = traceElement("div", "space-y-2");
+      const input = traceDetails(`LLM Input · ${call.input?.message_count ?? 0} messages`, true);
+      (call.input?.messages || []).forEach((message) => input.body.appendChild(renderTraceMessage(message)));
+      wrapper.appendChild(input.details);
+      const output = traceDetails("LLM Output", false);
+      const content = call.output?.content;
+      if (content) {
+        output.body.appendChild(tracePre(content));
+      }
+      const toolCalls = call.output?.tool_calls || [];
+      if (toolCalls.length) {
+        output.body.appendChild(traceElement("div", "text-[11px] text-slate-600", `Model requested ${toolCalls.length} tool call${toolCalls.length === 1 ? "" : "s"}`));
+        output.body.appendChild(tracePre(toolCalls));
+      } else if (!content) {
+        output.body.appendChild(traceElement("div", "text-xs text-slate-500", "公开输出为空。"));
+      }
+      wrapper.appendChild(output.details);
+      return wrapper;
+    }
+
+    function renderToolCall(call) {
+      const section = traceDetails(`Tool Call · ${call.name || "unknown"}`, false);
+      section.body.appendChild(traceElement("div", "text-[11px] text-slate-500", `call_index: ${call.call_index ?? "—"} · tool_call_id: ${call.tool_call_id || "—"}`));
+      section.body.appendChild(tracePre(call.arguments || {}));
+      return section.details;
+    }
+
+    function renderToolResult(result) {
+      const section = traceDetails(`Tool Result · ${result.name || "unknown"}`, false);
+      const statusTone = result.status === "success" ? "green" : "rose";
+      section.body.append(traceLabel(result.status || "unknown", statusTone), traceElement("span", "ml-2 text-[11px] text-slate-500", `tool_call_id: ${result.tool_call_id || "—"}`));
+      const current = result.current_run_result || {};
+      const currentView = traceDetails(`Current Run Result · ${formatTraceSize(current.size_chars)}`, false);
+      currentView.body.appendChild(traceElement("div", "text-[11px] text-slate-500", `Truncated in debug storage: ${current.truncated ? "Yes" : "No"}`));
+      currentView.body.appendChild(tracePre(current.preview || ""));
+      section.body.appendChild(currentView.details);
+      const projection = result.history_projection || {};
+      const historyView = traceDetails(`History Projection · ${projection.projector || "fallback"}`, false);
+      historyView.body.appendChild(traceElement("div", "text-[11px] text-slate-500", `History size: ${formatTraceSize(projection.history_result_size)}`));
+      historyView.body.appendChild(tracePre(result.history_result || {}));
+      section.body.appendChild(historyView.details);
+      const ratio = Number(projection.compression_ratio);
+      const compression = traceElement("div", "mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-600");
+      compression.appendChild(traceElement("div", "font-medium text-slate-800", "Compression"));
+      compression.appendChild(traceElement("div", "mt-1", `Current: ${formatTraceSize(projection.model_result_size)} · History: ${formatTraceSize(projection.history_result_size)}`));
+      if (Number.isFinite(ratio)) {
+        compression.appendChild(traceElement("div", "mt-1", `History / Current: ${(ratio * 100).toFixed(2)}% · Reduction: ${((1 - ratio) * 100).toFixed(2)}%`));
+      }
+      section.body.appendChild(compression);
+      return section.details;
+    }
+
+    function renderTraceStep(step) {
+      const section = traceDetails(`Step ${step.step}`, true);
+      const counts = traceElement("div", "mb-3 flex flex-wrap gap-2 text-[11px] text-slate-500");
+      counts.append(traceLabel(`LLM ${step.llm_calls?.length || 0}`), traceLabel(`Tool Calls ${step.tool_calls?.length || 0}`), traceLabel(`Results ${step.tool_results?.length || 0}`));
+      section.body.appendChild(counts);
+      const timeline = traceDetails(`Timeline · ${step.timeline?.length || 0} events`, false);
+      (step.timeline || []).forEach((event) => timeline.body.appendChild(traceElement("div", "border-l border-slate-300 py-1 pl-2 text-[11px] text-slate-500", `#${event.trace_seq} · ${event.type}`)));
+      section.body.appendChild(timeline.details);
+      (step.llm_calls || []).forEach((call) => section.body.appendChild(renderLlmCall(call)));
+      (step.tool_calls || []).forEach((call) => section.body.appendChild(renderToolCall(call)));
+      (step.tool_results || []).forEach((result) => section.body.appendChild(renderToolResult(result)));
+      return section.details;
+    }
+
+    function renderInspectorNotice(text, tone = "slate") {
+      turnInspectorContent.replaceChildren(traceElement("div", `rounded-lg border p-3 text-sm ${tone === "rose" ? "border-rose-200 bg-rose-50 text-rose-700" : "border-slate-200 bg-slate-50 text-slate-600"}`, text));
+    }
+
+    function renderTurnTrace(trace) {
+      turnInspectorContent.replaceChildren();
+      turnInspectorMeta.textContent = `Turn ${String(trace.turn_id || "").slice(0, 10)}`;
+      const turn = traceDetails("Turn", true);
+      const tone = trace.status === "success" ? "green" : trace.status === "error" ? "rose" : "amber";
+      turn.body.append(traceLabel(trace.status || "incomplete", tone), traceElement("div", "mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-900", trace.user_input || "（未记录用户输入）"));
+      if (trace.status === "incomplete") {
+        turn.body.appendChild(traceElement("div", "mt-2 text-xs text-amber-700", "执行中或未完整结束；可稍后重新点击轨迹刷新。"));
+      }
+      turnInspectorContent.appendChild(turn.details);
+      (trace.steps || []).forEach((step) => turnInspectorContent.appendChild(renderTraceStep(step)));
+      const final = traceDetails("Final Answer", false);
+      final.body.appendChild(tracePre(trace.final_answer || "（尚无最终回答）"));
+      turnInspectorContent.appendChild(final.details);
+    }
+
+    function closeTurnInspector() {
+      inspectorSessionId = "";
+      inspectorTurnId = "";
+      turnInspector.classList.add("hidden");
+      turnInspectorMeta.textContent = "";
+      turnInspectorContent.replaceChildren();
+    }
+
+    async function openTurnInspector(sessionId, turnId) {
+      inspectorSessionId = sessionId;
+      inspectorTurnId = turnId;
+      turnInspector.classList.remove("hidden");
+      turnInspectorMeta.textContent = `Turn ${String(turnId).slice(0, 10)}`;
+      renderInspectorNotice("正在加载轨迹...");
+      try {
+        const response = await fetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/trace`);
+        const payload = await parseJsonResponse(response);
+        if (!response.ok) {
+          throw new Error(response.status === 404 ? "该 Turn 没有可用的 Debug Trace。" : (payload.detail || "加载轨迹失败。"));
+        }
+        if (activeSessionId !== sessionId || inspectorSessionId !== sessionId || inspectorTurnId !== turnId) {
+          return;
+        }
+        renderTurnTrace(payload);
+      } catch (error) {
+        if (inspectorSessionId === sessionId && inspectorTurnId === turnId) {
+          renderInspectorNotice(error.message || "加载轨迹失败。", "rose");
+        }
+      }
+    }
+
     async function newConversation() {
       if (isGenerating) {
         return;
@@ -421,6 +645,7 @@
         }
       }
       const sessionId = createUuid();
+      closeTurnInspector();
       conversations.unshift({
         sessionId,
         title: "新对话",
@@ -466,7 +691,9 @@
         loading: Boolean(options.loading),
         attachment: options.attachment || null,
         activity: Array.isArray(options.activity) ? options.activity : [],
-        activityCollapsed: Boolean(options.activityCollapsed)
+        activityCollapsed: Boolean(options.activityCollapsed),
+        sessionId: options.sessionId || null,
+        turnId: options.turnId || null
       };
       conversation.messages.push(message);
       renderMessages();
@@ -647,7 +874,7 @@
         const data = event.data || {};
         const turnId = event.turn_id;
         if (event.event_type === "user/message") {
-          addMessage("user", data.content || "");
+          addMessage("user", data.content || "", { sessionId: activeSessionId, turnId });
           const assistant = addMessage("assistant", "", { loading: true, activityCollapsed: true });
           if (turnId) {
             assistantByTurn.set(turnId, assistant.id);
@@ -732,6 +959,9 @@
         throw new Error("恢复会话失败。");
       }
       const payload = await parseJsonResponse(response);
+      if (sessionId !== activeSessionId) {
+        closeTurnInspector();
+      }
       const session = payload.session || {};
       const restoredConversation = {
         sessionId: session.session_id,
@@ -889,6 +1119,9 @@
         }
         try {
           await refreshSessionHistory();
+          if (activeSessionId === streamSessionId) {
+            await restoreConversation(streamSessionId);
+          }
         } catch (error) {
           statusText.textContent = error.message || "刷新会话列表失败。";
         }
@@ -1032,6 +1265,7 @@
 
     newChatButton.addEventListener("click", newConversation);
     mobileNewChatButton.addEventListener("click", newConversation);
+    closeTurnInspectorButton.addEventListener("click", closeTurnInspector);
     sendButton.addEventListener("click", sendChatMessage);
     removePendingAttachmentButton.addEventListener("click", removePendingAttachment);
     messageInput.addEventListener("input", resizeTextarea);

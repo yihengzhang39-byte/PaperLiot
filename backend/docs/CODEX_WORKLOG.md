@@ -1206,3 +1206,80 @@ Use completed SQLite session events as the authoritative prior-turn model histor
 - No real provider request, network call, `.env` change, commit, or push was performed.
 
 ---
+
+### 2026-09-04 - D1 Harness Debug Trace Foundation
+
+**Goal:**
+
+持久化真实 Turn/Step/LLM/Tool 执行事实，且不污染语义会话事件、F5 replay 或模型历史投影。
+
+**Files changed:**
+
+- `app/services/debug_trace_service.py`、`app/repositories/debug_trace_repository.py`、`app/services/sqlite_service.py`
+- `app/agents/paper_agent.py`、`app/agents/agent_loop.py`、`app/runtime/tool_executor.py`、`app/api/routes/chat.py`
+- `app/core/config.py`、`README.md`、`scripts/test_debug_trace_foundation.py`
+
+**Decisions made:**
+
+- 使用独立 `debug_trace_events` SQLite 表，以 `session_id + turn_id + trace_seq` 绑定；不复用 `session_events`。
+- Agent Loop 在传入 Provider callable 前记录其原样 messages；当前 Provider adapter 将这份列表直接写入请求 body。origin 由构造消息时的 sidecar metadata 显式传递，不从文本或 role 推测。
+- Tool debug 保存有界 current-run preview/大小与完整的正常 history projection，并标记 projector 名称；不保存 hidden CoT，敏感字段和值会脱敏。
+- Trace 写入失败仅记录日志，不中断 Agent；normal 和 stream 都经同一 Agent Loop 采集路径。
+
+**Validation:**
+
+- `test_debug_trace_foundation`、`test_model_history_projection`、`test_tool_history_projection`、`test_session_event_persistence`、`test_session_restore`、`test_session_history`、`test_chat_agent_integration`、`test_agent_streaming`、`test_agent_loop`、`test_tool_runtime`、`test_tool_contract`、`test_tool_concurrency`、`test_sqlite_persistence`、`test_session_delete` 通过。
+- `git diff --check` 通过；未调用真实 LLM、外网、未改 `.env`、未新增 HTTP API 或前端。
+
+---
+
+### 2026-09-04 - D2 Turn Trace Projector and Read-only API
+
+**Goal:**
+
+将 D1 debug trace 与同 Turn 的语义事件投影为稳定 Inspector ViewModel，并提供只读读取入口。
+
+**Files changed:**
+
+- `app/services/turn_trace_service.py`、`app/api/routes/chat.py`
+- `scripts/test_turn_trace_projection.py`、`scripts/test_turn_trace_api.py`
+- `README.md`
+
+**Decisions made:**
+
+- `TurnTraceService` 只读取 `debug_trace_events` 与 `session_events`；用户输入和最终回答分别优先采用 `user/message`、`assistant/message`。
+- Step 保留 D1 `trace_seq` timeline；LLM input/output 按 trace 顺序配对，Tool call/result 始终按 `tool_call_id` 配对。
+- Trace 关闭或未被捕获会明确返回 404；中断但有部分 trace 的 Turn 返回 `status=incomplete` 与现有数据。
+- 未修改 Agent Loop、Tool Runtime、LLM 捕获、历史投影或前端。
+
+**Validation:**
+
+- `test_turn_trace_projection`、`test_turn_trace_api`、D1 专项测试及 session/Agent/Tool/SQLite 全部相关回归通过。
+- `git diff --check` 通过；未调用真实 LLM、外网，未修改 `.env`、未新增前端。
+
+---
+
+### 2026-09-04 - D3 Frontend Harness Inspector
+
+**Goal:**
+
+让每条已持久化用户消息以真实 `session_id + turn_id` 打开对应的 D2 Turn Trace Drawer。
+
+**Files changed:**
+
+- `static/index.html`、`scripts/test_agent_runtime_ui.py`
+- `README.md`
+
+**Decisions made:**
+
+- F5 restore 直接把 `user/message` 的真实 `turn_id` 写入前端 Message ViewModel；实时 Turn 结束后复用既有 restore 路径获得同一身份，不按文本或数组位置匹配。
+- Drawer 仅请求 D2 Trace API；System prompt 默认折叠，动态 Trace 文本和 JSON 均经 `textContent` 写入。
+- Tool Result 分别展示 current-run preview、history projection 与 D2 compression metadata；ratio 使用 D1 定义，另显示 `1 - ratio` 的 Reduction。
+- 切换会话/新建会话自动关闭 Inspector；不做轮询、重放、搜索、导出或 D3 之外的 UI。
+
+**Validation:**
+
+- `test_agent_runtime_ui`、D1/D2 专项测试及 session/chat/streaming 相关回归通过；JavaScript 语法和 `git diff --check` 通过。
+- 未修改后端 Agent/Tool/LLM Runtime、Trace 捕获、D2 Projector 或前端依赖。
+
+---

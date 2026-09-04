@@ -6,6 +6,7 @@ from app.agents.agent_context import AgentContext
 from app.agents.agent_loop import AgentEventSink, AgentLoopResult, LLMCaller, LLMStreamCaller, run_agent
 from app.runtime.tool_registry import ToolRegistry
 from app.services.llm_service import call_llm_with_tools
+from app.services.debug_trace_service import DebugTraceService
 from app.tools.memory_tools import MEMORY_TOOL_SPECS, register_memory_tools
 from app.tools.multi_paper_tools import MULTI_PAPER_TOOL_SPECS, register_multi_paper_tools
 from app.tools.paper_tools import PAPER_TOOL_SPECS, register_paper_tools
@@ -62,9 +63,10 @@ def build_paper_tool_registry() -> ToolRegistry:
     return registry
 
 
-def _semantic_history(history: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _semantic_history_with_origins(history: list[dict[str, Any]] | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Keep provider-compatible prior semantic and Tool-fact messages."""
     messages: list[dict[str, Any]] = []
+    origins: list[dict[str, Any]] = []
     for item in history or []:
         if not isinstance(item, dict) or not isinstance(item.get("content"), str):
             continue
@@ -74,9 +76,23 @@ def _semantic_history(history: list[dict[str, Any]] | None) -> list[dict[str, An
             if role == "assistant" and isinstance(item.get("tool_calls"), list):
                 message["tool_calls"] = item["tool_calls"]
             messages.append(message)
+            origins.append({"origin": "history_tool_call" if "tool_calls" in message else f"session_{role}"})
         elif role == "tool" and isinstance(item.get("tool_call_id"), str) and isinstance(item.get("name"), str):
             messages.append({"role": "tool", "tool_call_id": item["tool_call_id"], "name": item["name"], "content": item["content"]})
-    return messages
+            origins.append({"origin": "history_tool_result"})
+    return messages, origins
+
+
+def _semantic_history(history: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return _semantic_history_with_origins(history)[0]
+
+
+def _system_sources(system_context: str | None) -> list[str]:
+    sources = ["PAPER_AGENT_SYSTEM_PROMPT"]
+    for line in (system_context or "").splitlines():
+        if line.startswith("## ") and line[3:].strip():
+            sources.append(line[3:].strip())
+    return sources
 
 
 def build_paper_agent_messages(
@@ -123,6 +139,7 @@ def run_paper_agent(
     llm_call: LLMCaller = call_llm_with_tools,
     llm_stream: LLMStreamCaller | None = None,
     event_sink: AgentEventSink | None = None,
+    debug_trace: DebugTraceService | None = None,
 ) -> AgentLoopResult:
     """Run the generic loop with PaperPilot's prompt, tools, and schemas."""
     message = message.strip()
@@ -130,6 +147,12 @@ def run_paper_agent(
         raise ValueError("message cannot be empty")
     paper_id = paper_id.strip() if paper_id else None
     registry = build_paper_tool_registry()
+    _, history_origins = _semantic_history_with_origins(history)
+    message_origins = [
+        {"origin": "system_prompt", "metadata": {"sources": _system_sources(system_context)}},
+        *history_origins,
+        {"origin": "current_user"},
+    ]
     context = AgentContext(
         session_id=session_id,
         paper_id=paper_id,
@@ -146,7 +169,8 @@ def run_paper_agent(
                 "paper_id": paper_id,
                 "active_paper_ids": active_paper_ids or [],
                 "available_tools": list(registry.names()),
-            }
+            },
+            "message_origins": message_origins,
         },
     )
     return run_agent(
@@ -156,4 +180,5 @@ def run_paper_agent(
         llm_call=llm_call,
         llm_stream=llm_stream,
         event_sink=event_sink,
+        debug_trace=debug_trace,
     )

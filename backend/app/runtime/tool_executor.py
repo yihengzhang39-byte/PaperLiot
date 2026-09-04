@@ -23,6 +23,7 @@ class ToolExecutionResult:
     content: str
     error: str | None = None
     history_result: dict[str, Any] | None = None
+    history_projector: str | None = None
 
 
 def parse_arguments(arguments: str | dict[str, Any]) -> dict[str, Any]:
@@ -150,13 +151,13 @@ def _history_status(result: ToolExecutionResult) -> str:
     return "error" if isinstance(payload, dict) and payload.get("success") is False else "success"
 
 
-def _project_history_result(arguments: dict[str, Any], result: ToolExecutionResult, registry: ToolRegistry) -> dict[str, Any]:
+def _project_history_result(arguments: dict[str, Any], result: ToolExecutionResult, registry: ToolRegistry) -> tuple[dict[str, Any], str]:
     definition = registry.definition(result.tool_name)
     if definition and definition.project_history_result:
         try:
             projected = definition.project_history_result(arguments, result)
             if isinstance(projected, dict):
-                return projected
+                return projected, getattr(definition.project_history_result, "__name__", "tool_projector")
         except Exception:
             pass
     status = _history_status(result)
@@ -165,7 +166,7 @@ def _project_history_result(arguments: dict[str, Any], result: ToolExecutionResu
         projected["summary"] = (result.error or "Tool reported failure.")[:300]
     else:
         projected["summary"] = _result_summary(result)[:300]
-    return projected
+    return projected, "fallback"
 
 
 def _emit_result(
@@ -253,7 +254,8 @@ def execute_tool_call(
         ok=True,
         content=_serialize_result(result),
     )
-    completed = replace(completed, history_result=_project_history_result(arguments, completed, registry))
+    history_result, history_projector = _project_history_result(arguments, completed, registry)
+    completed = replace(completed, history_result=history_result, history_projector=history_projector)
     _update_produced_state(completed, registry, context)
     _emit_result(event_sink, completed, step)
     return completed

@@ -97,6 +97,13 @@ class ToolRuntimeConfig:
     max_parallel_tool_calls: int = 10
 
 
+@dataclass(frozen=True)
+class HarnessDebugTraceConfig:
+    """Local-only observability switch for provider and Tool execution facts."""
+
+    enabled: bool = True
+
+
 def _get_int_env(name: str, default: int) -> int:
     """Read an integer environment variable with a safe default."""
     value = os.getenv(name, "").strip()
@@ -210,6 +217,11 @@ def get_tool_runtime_config() -> ToolRuntimeConfig:
     return ToolRuntimeConfig(max_parallel_tool_calls=max(_get_int_env("TOOL_MAX_PARALLEL_CALLS", 10), 1))
 
 
+def get_harness_debug_trace_config() -> HarnessDebugTraceConfig:
+    """Read the single switch controlling debug-trace persistence."""
+    return HarnessDebugTraceConfig(enabled=_get_bool_env("HARNESS_DEBUG_TRACE", True))
+
+
 LLM_PROVIDER = get_llm_config().provider
 LLM_API_KEY = get_llm_config().api_key
 LLM_BASE_URL = get_llm_config().base_url
@@ -237,6 +249,7 @@ RAG_CHUNK_OVERLAP = get_rag_config().chunk_overlap
 RAG_TOP_K = get_rag_config().top_k
 CHAT_HISTORY_MAX_MESSAGES = get_session_config().max_history_messages
 TOOL_MAX_PARALLEL_CALLS = get_tool_runtime_config().max_parallel_tool_calls
+HARNESS_DEBUG_TRACE = get_harness_debug_trace_config().enabled
 
 
 """

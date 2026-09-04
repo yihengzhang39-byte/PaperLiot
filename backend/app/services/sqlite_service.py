@@ -55,6 +55,19 @@ def initialize_database(database_path: Path | None = None) -> None:
                 created_at TEXT NOT NULL,
                 UNIQUE (session_id, seq)
             );
+            CREATE TABLE IF NOT EXISTS debug_trace_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                step INTEGER NULL,
+                trace_seq INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (session_id, turn_id, trace_seq)
+            );
+            CREATE INDEX IF NOT EXISTS idx_debug_trace_events_turn
+                ON debug_trace_events (session_id, turn_id, trace_seq);
             CREATE TABLE IF NOT EXISTS persistence_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL

@@ -77,6 +77,7 @@ PLAN_AGENT_LLM_ENABLED=false
 PLAN_AGENT_MAX_INPUT_CHARS=3000
 PLAN_AGENT_CONFIDENCE_THRESHOLD=0.7
 TOOL_MAX_PARALLEL_CALLS=10
+HARNESS_DEBUG_TRACE=true
 ```
 
 环境变量说明：
@@ -101,6 +102,7 @@ TOOL_MAX_PARALLEL_CALLS=10
 - `PLAN_AGENT_MAX_INPUT_CHARS`：`plan_agent_node` 发送给 LLM 的 `raw_text_preview` 最大长度，默认 `3000`
 - `PLAN_AGENT_CONFIDENCE_THRESHOLD`：LLM plan 被采纳的最低置信度，默认 `0.7`
 - `TOOL_MAX_PARALLEL_CALLS`：同一 Agent Step 内安全 Tool 调用的最大并发数，默认 `10`；设为 `1` 时全部串行
+- `HARNESS_DEBUG_TRACE`：是否将本地 Harness 调试事实写入独立 SQLite trace 表，默认 `true`；生产环境可设为 `false`
 
 ## PDF Parser 架构
 
@@ -381,6 +383,18 @@ http://127.0.0.1:8000/docs
 ```bash
 curl http://127.0.0.1:8000/health
 ```
+
+## Harness Turn Trace
+
+当 `HARNESS_DEBUG_TRACE=true` 时，可只读查看某一聊天 Turn 的已持久化调试投影：
+
+```text
+GET /api/chat/sessions/{session_id}/turns/{turn_id}/trace
+```
+
+先通过 `GET /api/chat/sessions/{session_id}` 的 `events` 找到目标 user message 对应的 `turn_id`，再查询 Trace。该接口只读取 D1 已记录的 Provider-facing LLM 输入、公开输出和 Tool 结果预览；不会重跑 Agent、Tool 或 LLM。
+
+聊天页面会在已持久化的每条用户消息旁显示“轨迹”入口；点击后在右侧 Harness Inspector 查看该 Turn。刷新后的历史消息同样可用；没有 D1 Trace 的旧 Turn 会显示友好提示。
 
 ## 章节抽取策略与调试
 

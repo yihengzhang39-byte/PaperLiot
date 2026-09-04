@@ -22,9 +22,11 @@ from app.services.llm_service import (
     set_llm_input_diagnostic_session,
 )
 from app.services.session_event_service import SessionEventService
+from app.services.debug_trace_service import DebugTraceService
 from app.services.session_model_history_service import project_session_events_to_messages
 from app.services.session_restore_service import create_session_restore, delete_session_restore, list_session_history, load_session_restore
 from app.services.session_service import ChatSessionState, load_session, save_session
+from app.services.turn_trace_service import TurnTraceNotFoundError, TurnTraceService, TurnTraceUnavailableError
 
 
 router = APIRouter()
@@ -180,6 +182,8 @@ def _stream_agent_events(
     queue: Queue[dict[str, object] | None] = Queue()
     event_log = SessionEventService(session_id)
     event_log.start(message, paper_id=paper_id, active_paper_ids=session.active_paper_ids)
+    debug_trace = DebugTraceService(session_id, event_log.turn_id)
+    debug_trace.start()
 
     def event_sink(event: dict[str, object]) -> None:
         event_log.persist_runtime_event(event)
@@ -197,17 +201,22 @@ def _stream_agent_events(
                 active_paper_ids=session.active_paper_ids,
                 llm_stream=call_llm_with_tools_stream,
                 event_sink=event_sink,
+                debug_trace=debug_trace,
             )
             _save_chat_turn(session_id, session, message, result.final_answer)
+            debug_trace.finish("success")
         except AgentMaxStepsError:
             logger.warning("Paper Agent reached max steps for session %s", session_id)
             event_log.finish("error", code="agent_max_steps", message="Paper Agent reached max steps.")
+            debug_trace.finish("error")
         except ValueError:
             logger.warning("Invalid Paper Agent request for session %s", session_id)
             event_log.finish("error", code="agent_invalid_request", message="Paper Agent request was invalid.")
+            debug_trace.finish("error")
         except Exception:
             logger.exception("Paper Agent stream failed for session %s", session_id)
             event_log.finish("error", code="agent_failed", message="Paper Agent execution failed.")
+            debug_trace.finish("error")
         finally:
             reset_llm_input_diagnostic_session(diagnostic_token)
             queue.put(None)
@@ -229,6 +238,8 @@ def chat(request: ChatRequest) -> dict[str, str]:
     session_id, message, session, paper_id = _prepare_chat(request)
     event_log = SessionEventService(session_id)
     event_log.start(message, paper_id=paper_id, active_paper_ids=session.active_paper_ids)
+    debug_trace = DebugTraceService(session_id, event_log.turn_id)
+    debug_trace.start()
 
     diagnostic_token = set_llm_input_diagnostic_session(session_id)
     try:
@@ -240,6 +251,7 @@ def chat(request: ChatRequest) -> dict[str, str]:
             "system_context": _load_memory_context(),
             "active_paper_ids": session.active_paper_ids,
             "event_sink": event_log.persist_runtime_event,
+            "debug_trace": debug_trace,
         }
         if config.provider == "mock":
             run_options["llm_call"] = lambda *_args: AgentLLMResponse(_mock_chat_reply(message), [])
@@ -249,18 +261,22 @@ def chat(request: ChatRequest) -> dict[str, str]:
         )
         reply = result.final_answer
         _save_chat_turn(session_id, session, message, reply)
+        debug_trace.finish("success")
         return {"reply": reply}
     except AgentMaxStepsError as exc:
         logger.warning("Paper Agent reached max steps for session %s", session_id)
         event_log.finish("error", code="agent_max_steps", message="Paper Agent reached max steps.")
+        debug_trace.finish("error")
         raise HTTPException(status_code=502, detail="Paper Agent 达到最大推理步数。") from exc
     except ValueError as exc:
         logger.warning("Invalid Paper Agent request for session %s", session_id)
         event_log.finish("error", code="agent_invalid_request", message="Paper Agent request was invalid.")
+        debug_trace.finish("error")
         raise HTTPException(status_code=400, detail="聊天请求无效。") from exc
     except Exception as exc:
         logger.exception("Paper Agent request failed for session %s", session_id)
         event_log.finish("error", code="agent_failed", message="Paper Agent execution failed.")
+        debug_trace.finish("error")
         raise HTTPException(status_code=502, detail="Paper Agent 请求失败。") from exc
     finally:
         reset_llm_input_diagnostic_session(diagnostic_token)
@@ -307,6 +323,19 @@ def delete_chat_session(session_id: str) -> dict[str, object]:
     if not deleted:
         raise HTTPException(status_code=404, detail="会话不存在。")
     return {"success": True, "session_id": session_id}
+
+
+@router.get("/sessions/{session_id}/turns/{turn_id}/trace")
+def get_chat_turn_trace(session_id: str, turn_id: str) -> dict[str, object]:
+    """Return a stored, read-only Inspector view for one completed or partial turn."""
+    try:
+        return TurnTraceService().get_turn_trace(session_id, turn_id)
+    except TurnTraceNotFoundError as exc:
+        detail = "会话不存在。" if str(exc) == "session" else "Turn 不存在。"
+        raise HTTPException(status_code=404, detail=detail) from exc
+    except TurnTraceUnavailableError as exc:
+        detail = "Harness Debug Trace 已禁用。" if str(exc) == "disabled" else "该 Turn 未保存 Debug Trace。"
+        raise HTTPException(status_code=404, detail=detail) from exc
 
 
 @router.get("/sessions/{session_id}")

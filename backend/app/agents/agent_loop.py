@@ -7,12 +7,16 @@ from typing import Any
 
 from app.agents.agent_context import AgentContext
 from app.runtime.tool_executor import execute_tool_calls
+from app.services.debug_trace_service import DebugTraceService
 from app.runtime.tool_registry import Tool, ToolRegistry
 from app.services.llm_service import (
     AgentLLMDelta,
     AgentLLMResponse,
     AgentToolCall,
     call_llm_with_tools,
+    call_llm_with_tools_stream,
+    reset_llm_debug_trace,
+    set_llm_debug_trace,
 )
 
 
@@ -103,6 +107,7 @@ def run_agent(
     llm_call: LLMCaller = call_llm_with_tools,
     llm_stream: LLMStreamCaller | None = None,
     event_sink: AgentEventSink | None = None,
+    debug_trace: DebugTraceService | None = None,
 ) -> AgentLoopResult:
     """Run LLM -> tool calls -> tool results until the LLM returns an answer."""
     if tools is not None and tool_registry is not None:
@@ -110,6 +115,12 @@ def run_agent(
     registry = tool_registry or ToolRegistry.from_mapping(tools or {})
     tool_specs = tool_specs or []
     trace = context.metadata.setdefault("agent_trace", [])
+    message_origins = context.metadata.setdefault("message_origins", [])
+    if not isinstance(message_origins, list):
+        message_origins = []
+        context.metadata["message_origins"] = message_origins
+    while len(message_origins) < len(context.messages):
+        message_origins.append({"origin": "unknown"})
     events: list[dict[str, Any]] = []
 
     def emit(event_type: str, **data: Any) -> None:
@@ -134,20 +145,31 @@ def run_agent(
             context.step += 1
             emit("step_start", step=context.step)
             emit("llm_start", step=context.step)
+            provider_adapter = llm_call is call_llm_with_tools or llm_stream is call_llm_with_tools_stream
+            if debug_trace is not None and not provider_adapter:
+                debug_trace.record_llm_input(context.messages, message_origins, step=context.step)
 
             streamed_content: list[str] = []
-            if llm_stream is None:
-                response = llm_call(context.messages, tool_specs)
-            else:
-                def emit_stream_content(delta: str) -> None:
-                    if delta:
-                        streamed_content.append(delta)
-                        emit("llm_delta", step=context.step, delta=delta)
+            debug_token = set_llm_debug_trace(debug_trace, context.step, message_origins) if debug_trace is not None else None
+            try:
+                if llm_stream is None:
+                    response = llm_call(context.messages, tool_specs)
+                else:
+                    def emit_stream_content(delta: str) -> None:
+                        if delta:
+                            streamed_content.append(delta)
+                            emit("llm_delta", step=context.step, delta=delta)
 
-                response, _ = _merge_stream_tool_calls(
-                    llm_stream(context.messages, tool_specs),
-                    emit_stream_content,
-                )
+                    response, _ = _merge_stream_tool_calls(
+                        llm_stream(context.messages, tool_specs),
+                        emit_stream_content,
+                    )
+            finally:
+                if debug_token is not None:
+                    reset_llm_debug_trace(debug_token)
+
+            if debug_trace is not None:
+                debug_trace.record_llm_output(response, step=context.step)
 
             context.messages.append(
                 {
@@ -156,6 +178,7 @@ def run_agent(
                     "tool_calls": [_tool_call_message(tool_call) for tool_call in response.tool_calls],
                 }
             )
+            message_origins.append({"origin": "current_run_assistant"})
             trace.append({"step": context.step, "tool_call_count": len(response.tool_calls)})
 
             # Only provider-visible assistant content is emitted here; hidden
@@ -175,7 +198,7 @@ def run_agent(
                 trace.append({"step": context.step, "finish_reason": "final_answer"})
                 return AgentLoopResult(final_answer=response.content, context=context, events=events)
 
-            for tool_call in response.tool_calls:
+            for order_index, tool_call in enumerate(response.tool_calls):
                 emit(
                     "tool_call",
                     step=context.step,
@@ -183,14 +206,19 @@ def run_agent(
                     name=tool_call.name,
                     arguments=_event_arguments(tool_call.arguments),
                 )
-            for result in execute_tool_calls(
+                if debug_trace is not None:
+                    debug_trace.record_tool_call(tool_call, step=context.step, order_index=order_index)
+            tool_results = execute_tool_calls(
                 response.tool_calls,
                 registry,
                 trace=trace,
                 step=context.step,
                 event_sink=emit_runtime,
                 context=context,
-            ):
+            )
+            for order_index, result in enumerate(tool_results):
+                if debug_trace is not None:
+                    debug_trace.record_tool_result(result, step=context.step, order_index=order_index)
                 context.messages.append(
                     {
                         "role": "tool",
@@ -199,6 +227,7 @@ def run_agent(
                         "content": result.content,
                     }
                 )
+                message_origins.append({"origin": "current_run_tool_result"})
             emit("step_end", step=context.step, status="tool_calls")
 
         trace.append({"step": context.step, "finish_reason": "max_steps"})

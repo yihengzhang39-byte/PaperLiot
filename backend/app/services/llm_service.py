@@ -11,10 +11,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from app.core.config import LLMConfig, get_llm_config
+from app.services.debug_trace_service import DebugTraceService
 
 
 logger = logging.getLogger(__name__)
 _LLM_INPUT_DIAG_SESSION_ID: ContextVar[str | None] = ContextVar("llm_input_diag_session_id", default=None)
+_LLM_DEBUG_TRACE: ContextVar[tuple[DebugTraceService, int, list[dict[str, Any]]] | None] = ContextVar("llm_debug_trace", default=None)
 _DIAG_SECRET_VALUE = re.compile(
     r"(?i)\b(api[_ -]?key|authorization|secret|token|password|credential)\b\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|\S+)"
 )
@@ -30,6 +32,22 @@ def set_llm_input_diagnostic_session(session_id: str) -> Token[str | None]:
 def reset_llm_input_diagnostic_session(token: Token[str | None]) -> None:
     """Clear the temporary provider-input diagnostic binding."""
     _LLM_INPUT_DIAG_SESSION_ID.reset(token)
+
+
+def set_llm_debug_trace(trace: DebugTraceService, step: int, origins: list[dict[str, Any]]) -> Token[Any]:
+    """Bind sidecar origins until the provider-facing request body is ready."""
+    return _LLM_DEBUG_TRACE.set((trace, step, origins))
+
+
+def reset_llm_debug_trace(token: Token[Any]) -> None:
+    _LLM_DEBUG_TRACE.reset(token)
+
+
+def _capture_provider_input(messages: list[dict[str, Any]]) -> None:
+    binding = _LLM_DEBUG_TRACE.get()
+    if binding is not None:
+        trace, step, origins = binding
+        trace.record_llm_input(messages, origins, step=step)
 
 
 def diagnostic_summary(value: object, limit: int = 180) -> str:
@@ -237,6 +255,7 @@ def call_llm_with_tools(
     """Call the configured provider with OpenAI-compatible tool definitions."""
     config = get_llm_config()
     if config.provider == "mock":
+        _capture_provider_input(messages)
         return AgentLLMResponse(
             content="当前处于 mock 模式，未执行工具调用。",
             tool_calls=[],
@@ -244,16 +263,15 @@ def call_llm_with_tools(
 
     _validate_real_llm_config(config)
     _log_llm_input_diagnostic(messages)
-    message = _request_chat_completion(
-        {
-            "model": config.model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "temperature": config.temperature,
-        },
-        config,
-    )
+    body = {
+        "model": config.model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
+        "temperature": config.temperature,
+    }
+    _capture_provider_input(body["messages"])
+    message = _request_chat_completion(body, config)
     tool_calls: list[AgentToolCall] = []
     for index, tool_call in enumerate(message.get("tool_calls") or []):
         if not isinstance(tool_call, dict):
@@ -353,21 +371,21 @@ def call_llm_with_tools_stream(
     """Yield native provider deltas for one tool-capable LLM turn."""
     config = get_llm_config()
     if config.provider == "mock":
+        _capture_provider_input(messages)
         yield AgentLLMDelta(content="当前处于 mock 模式，未执行工具调用。")
         return
 
     _validate_real_llm_config(config)
     _log_llm_input_diagnostic(messages)
-    yield from _stream_chat_completion(
-        {
-            "model": config.model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "temperature": config.temperature,
-        },
-        config,
-    )
+    body = {
+        "model": config.model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
+        "temperature": config.temperature,
+    }
+    _capture_provider_input(body["messages"])
+    yield from _stream_chat_completion(body, config)
 
 
 def mock_extract_paper_info(text: str) -> dict[str, object]:
