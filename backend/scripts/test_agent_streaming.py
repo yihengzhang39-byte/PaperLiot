@@ -72,10 +72,13 @@ def main() -> None:
     )
     assert direct.final_answer == "hello world"
     assert _types(direct) == [
-        "user_message", "agent_start", "step_start", "llm_start", "llm_delta", "llm_delta", "llm_message", "final_start", "final_delta", "final_delta", "final_end", "step_end", "agent_done",
+        "user_message", "agent_start", "step_start", "llm_start", "llm_delta", "llm_delta", "llm_message", "assistant_trace", "final_start", "final_delta", "final_delta", "final_end", "step_end", "agent_done",
     ]
     assert direct.events[0] == {"type": "user_message", "content": "hello"}
     assert next(event for event in direct.events if event["type"] == "llm_message")["content"] == "hello world"
+    assert next(event for event in direct.events if event["type"] == "assistant_trace") == {
+        "type": "assistant_trace", "step": 1, "content": "hello world"
+    }
 
     tool_final = run_agent(
         _context(),
@@ -91,6 +94,9 @@ def main() -> None:
     assert all(name in _types(tool_final) for name in ("tool_call", "tool_start", "tool_result"))
     assert next(event for event in tool_final.events if event["type"] == "tool_call")["arguments"] == {"text": "hello"}
     assert next(event for event in tool_final.events if event["type"] == "llm_message")["content"] == "我需要调用工具。"
+    assert [event["type"] for event in tool_final.events].index("assistant_trace") < [
+        event["type"] for event in tool_final.events
+    ].index("tool_call")
 
     multi = run_agent(
         _context(),
@@ -103,6 +109,7 @@ def main() -> None:
         ),
     )
     assert [event["tool_call_id"] for event in multi.events if event["type"] == "tool_start"] == ["one", "two"]
+    assert not any(event["type"] == "assistant_trace" and event["step"] == 1 for event in multi.events)
 
     tool_error = run_agent(
         _context(),
@@ -190,6 +197,7 @@ def main() -> None:
         )
         loaded = session_service.load_session("stream-session")
         assert events[-1]["type"] == "agent_done"
+        assert any(event == {"type": "assistant_trace", "step": 1, "content": "streamed reply"} for event in events)
         assert loaded is not None and loaded.messages == [
             {"role": "user", "content": "question"},
             {"role": "assistant", "content": "streamed reply"},

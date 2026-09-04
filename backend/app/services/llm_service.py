@@ -1,7 +1,9 @@
 """Configurable LLM service for paper reading tasks."""
 
 import json
+import logging
 import re
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from collections.abc import Iterator
 from typing import Any
@@ -9,6 +11,52 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from app.core.config import LLMConfig, get_llm_config
+
+
+logger = logging.getLogger(__name__)
+_LLM_INPUT_DIAG_SESSION_ID: ContextVar[str | None] = ContextVar("llm_input_diag_session_id", default=None)
+_DIAG_SECRET_VALUE = re.compile(
+    r"(?i)\b(api[_ -]?key|authorization|secret|token|password|credential)\b\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|\S+)"
+)
+_DIAG_BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[a-z0-9._-]+")
+_DIAG_API_KEY = re.compile(r"\bsk-[a-zA-Z0-9_-]{8,}\b")
+
+
+def set_llm_input_diagnostic_session(session_id: str) -> Token[str | None]:
+    """Bind a chat session to temporary provider-input diagnostics."""
+    return _LLM_INPUT_DIAG_SESSION_ID.set(session_id)
+
+
+def reset_llm_input_diagnostic_session(token: Token[str | None]) -> None:
+    """Clear the temporary provider-input diagnostic binding."""
+    _LLM_INPUT_DIAG_SESSION_ID.reset(token)
+
+
+def diagnostic_summary(value: object, limit: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = _DIAG_SECRET_VALUE.sub(r"\1=<redacted>", text)
+    text = _DIAG_BEARER_TOKEN.sub("Bearer <redacted>", text)
+    text = _DIAG_API_KEY.sub("<redacted-api-key>", text)
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def _log_llm_input_diagnostic(messages: list[dict[str, Any]]) -> None:
+    lines: list[str] = []
+    for index, message in enumerate(messages):
+        role = str(message.get("role", "unknown"))
+        if role == "tool":
+            lines.append(
+                f"{index} tool: tool_call_id={message.get('tool_call_id', '')} "
+                f"name={message.get('name', '')} content_length={len(str(message.get('content', '') or ''))}"
+            )
+            continue
+        lines.append(f"{index} {role}: {diagnostic_summary(message.get('content', ''))!r}")
+    logger.warning(
+        "[LLM INPUT DIAG]\nsession_id=%s\nmessage_count=%d\n%s",
+        _LLM_INPUT_DIAG_SESSION_ID.get() or "unavailable",
+        len(messages),
+        "\n".join(lines),
+    )
 
 
 @dataclass(frozen=True)
@@ -195,6 +243,7 @@ def call_llm_with_tools(
         )
 
     _validate_real_llm_config(config)
+    _log_llm_input_diagnostic(messages)
     message = _request_chat_completion(
         {
             "model": config.model,
@@ -308,6 +357,7 @@ def call_llm_with_tools_stream(
         return
 
     _validate_real_llm_config(config)
+    _log_llm_input_diagnostic(messages)
     yield from _stream_chat_completion(
         {
             "model": config.model,

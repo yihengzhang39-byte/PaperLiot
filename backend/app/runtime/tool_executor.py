@@ -2,9 +2,10 @@
 
 import json
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from app.agents.agent_context import AgentContext
 from app.runtime.tool_registry import ToolRegistry
 from app.services.llm_service import AgentToolCall
 
@@ -21,6 +22,7 @@ class ToolExecutionResult:
     ok: bool
     content: str
     error: str | None = None
+    history_result: dict[str, Any] | None = None
 
 
 def parse_arguments(arguments: str | dict[str, Any]) -> dict[str, Any]:
@@ -50,8 +52,8 @@ def _serialize_result(result: Any) -> str:
         return str(result)
 
 
-def _trace(
-    trace: list[dict[str, Any]] | None,
+def trace_tool_event(
+    trace: list[dict[str, object]] | None,
     event: str,
     tool_call: AgentToolCall,
     step: int | None,
@@ -75,7 +77,36 @@ def _error_result(tool_call: AgentToolCall, error: str) -> ToolExecutionResult:
         ok=False,
         content=json.dumps({"ok": False, "error": error}, ensure_ascii=False),
         error=error,
+        history_result={"tool": tool_call.name, "status": "error", "summary": error[:300]},
     )
+
+
+def _missing_required_state(tool_name: str, registry: ToolRegistry, context: AgentContext | None) -> list[str]:
+    if context is None:
+        return []
+    definition = registry.definition(tool_name)
+    if definition is None:
+        return []
+    return [name for name in definition.requires if name not in context.state or context.state[name] is None]
+
+
+def _result_produced_successfully(result: ToolExecutionResult) -> bool:
+    """Treat explicit Tool payload failures as failures for state production."""
+    if not result.ok:
+        return False
+    try:
+        payload = json.loads(result.content)
+    except (TypeError, json.JSONDecodeError):
+        return True
+    return not isinstance(payload, dict) or payload.get("success") is not False
+
+
+def _update_produced_state(result: ToolExecutionResult, registry: ToolRegistry, context: AgentContext | None) -> None:
+    if context is None or not _result_produced_successfully(result):
+        return
+    definition = registry.definition(result.tool_name)
+    if definition is not None:
+        context.state.update({name: True for name in definition.produces})
 
 
 def _result_summary(result: ToolExecutionResult) -> str:
@@ -109,6 +140,34 @@ def _result_summary(result: ToolExecutionResult) -> str:
     return f"{result.tool_name} completed"
 
 
+def _history_status(result: ToolExecutionResult) -> str:
+    if not result.ok:
+        return "error"
+    try:
+        payload = json.loads(result.content)
+    except (TypeError, json.JSONDecodeError):
+        return "success"
+    return "error" if isinstance(payload, dict) and payload.get("success") is False else "success"
+
+
+def _project_history_result(arguments: dict[str, Any], result: ToolExecutionResult, registry: ToolRegistry) -> dict[str, Any]:
+    definition = registry.definition(result.tool_name)
+    if definition and definition.project_history_result:
+        try:
+            projected = definition.project_history_result(arguments, result)
+            if isinstance(projected, dict):
+                return projected
+        except Exception:
+            pass
+    status = _history_status(result)
+    projected: dict[str, Any] = {"tool": result.tool_name, "status": status}
+    if status == "error":
+        projected["summary"] = (result.error or "Tool reported failure.")[:300]
+    else:
+        projected["summary"] = _result_summary(result)[:300]
+    return projected
+
+
 def _emit_result(
     event_sink: RuntimeEventSink | None,
     result: ToolExecutionResult,
@@ -131,6 +190,7 @@ def _emit_result(
         "status": status,
         "success": status == "success",
         "summary": _result_summary(result),
+        "history_result": result.history_result or {"tool": result.tool_name, "status": status, "summary": _result_summary(result)[:300]},
     }
     if step is not None:
         event["step"] = step
@@ -144,18 +204,26 @@ def execute_tool_call(
     trace: list[dict[str, Any]] | None = None,
     step: int | None = None,
     event_sink: RuntimeEventSink | None = None,
+    context: AgentContext | None = None,
 ) -> ToolExecutionResult:
     """Execute one call and normalize all expected tool-runtime failures."""
-    _trace(trace, "tool_requested", tool_call, step)
+    trace_tool_event(trace, "tool_requested", tool_call, step)
     try:
         arguments = parse_arguments(tool_call.arguments)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        _trace(trace, "tool_failed", tool_call, step)
+        trace_tool_event(trace, "tool_failed", tool_call, step)
         result = _error_result(tool_call, f"Invalid arguments: {exc}")
         _emit_result(event_sink, result, step)
         return result
 
-    _trace(trace, "tool_started", tool_call, step)
+    missing_state = _missing_required_state(tool_call.name, registry, context)
+    if missing_state:
+        trace_tool_event(trace, "tool_failed", tool_call, step)
+        result = _error_result(tool_call, f"Missing required state: {', '.join(missing_state)}")
+        _emit_result(event_sink, result, step)
+        return result
+
+    trace_tool_event(trace, "tool_started", tool_call, step)
     if event_sink is not None:
         event: dict[str, Any] = {
             "type": "tool_start",
@@ -168,23 +236,25 @@ def execute_tool_call(
     try:
         result = dispatch(tool_call.name, arguments, registry)
     except LookupError as exc:
-        _trace(trace, "tool_failed", tool_call, step)
+        trace_tool_event(trace, "tool_failed", tool_call, step)
         failed = _error_result(tool_call, str(exc))
         _emit_result(event_sink, failed, step)
         return failed
     except Exception as exc:
-        _trace(trace, "tool_failed", tool_call, step)
+        trace_tool_event(trace, "tool_failed", tool_call, step)
         failed = _error_result(tool_call, f"Tool execution failed: {type(exc).__name__}")
         _emit_result(event_sink, failed, step)
         return failed
 
-    _trace(trace, "tool_succeeded", tool_call, step)
+    trace_tool_event(trace, "tool_succeeded", tool_call, step)
     completed = ToolExecutionResult(
         tool_call_id=tool_call.id,
         tool_name=tool_call.name,
         ok=True,
         content=_serialize_result(result),
     )
+    completed = replace(completed, history_result=_project_history_result(arguments, completed, registry))
+    _update_produced_state(completed, registry, context)
     _emit_result(event_sink, completed, step)
     return completed
 
@@ -196,9 +266,18 @@ def execute_tool_calls(
     trace: list[dict[str, Any]] | None = None,
     step: int | None = None,
     event_sink: RuntimeEventSink | None = None,
+    context: AgentContext | None = None,
 ) -> list[ToolExecutionResult]:
-    """Execute calls sequentially and preserve the LLM-provided order."""
-    return [
-        execute_tool_call(tool_call, registry, trace=trace, step=step, event_sink=event_sink)
-        for tool_call in tool_calls
-    ]
+    """Schedule safe calls concurrently while preserving result order."""
+    from app.core.config import get_tool_runtime_config
+    from app.runtime.tool_scheduler import execute_scheduled_tool_calls
+
+    return execute_scheduled_tool_calls(
+        tool_calls,
+        registry,
+        context=context,
+        max_parallel_tool_calls=get_tool_runtime_config().max_parallel_tool_calls,
+        trace=trace,
+        step=step,
+        event_sink=event_sink,
+    )

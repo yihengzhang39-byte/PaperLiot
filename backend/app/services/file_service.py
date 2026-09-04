@@ -1,22 +1,34 @@
 """Local file storage utilities for PDFs and Markdown notes."""
 
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import sqlite3
+from threading import Lock
 from typing import Mapping, Any
 from uuid import uuid4
 
 from fastapi import UploadFile
 
+from app.repositories.paper_repository import PaperRepository
 from app.core.config import (
     NOTES_DIR,
     PAPER_CHUNKS_DIR,
     PAPER_METADATA_DIR,
+    PAPER_INDEX_PATH,
     PAPER_PARSE_CACHE_DIR,
     PAPER_SECTION_JSON_DIR,
     PAPERS_DIR,
     ensure_storage_dirs,
 )
+from app.services.persistence_migration import migrate_legacy_papers
+
+
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+# ponytail: process-local lock reduces duplicate file work; SQLite UNIQUE resolves cross-process hash races.
+_PAPER_UPLOAD_LOCK = Lock()
 
 
 def generate_paper_id() -> str:
@@ -105,37 +117,83 @@ def read_paper_parse_cache(paper_id: str, parser_name: str) -> dict[str, Any] | 
     return payload if isinstance(payload, dict) else None
 
 
-def save_upload_pdf(file: UploadFile, paper_language: str = "zh") -> dict[str, str]:
-    """Save an uploaded PDF into local paper storage."""
+def save_upload_pdf(file: UploadFile, paper_language: str = "zh") -> dict[str, object]:
+    """Stream one upload, then reuse or create its canonical paper id by SHA-256."""
     ensure_storage_dirs()
-    paper_id = generate_paper_id()
-    filename = _safe_filename(file.filename or f"{paper_id}.pdf")
+    filename = _safe_filename(file.filename or "paper.pdf")
     paper_language = normalize_paper_language(paper_language)
-    target_path = PAPERS_DIR / f"{paper_id}_{filename}"
+    temp_path = PAPERS_DIR / f".upload-{uuid4().hex}.tmp"
+    hasher = hashlib.sha256()
+    moved_path: Path | None = None
+    paper_id: str | None = None
+    try:
+        with temp_path.open("wb") as output:
+            while chunk := file.file.read(UPLOAD_CHUNK_SIZE):
+                hasher.update(chunk)
+                output.write(chunk)
+        content_hash = hasher.hexdigest()
 
-    """
-        写到本地文件storage文件夹里面，使用分块写入以支持大文件上传
-    """
-    with target_path.open("wb") as output:
-        while chunk := file.file.read(1024 * 1024):
-            output.write(chunk)
+        migrate_legacy_papers(papers_dir=PAPERS_DIR, paper_index_path=PAPER_INDEX_PATH)
+        repository = PaperRepository()
+        with _PAPER_UPLOAD_LOCK:
+            existing = repository.find_by_hash(content_hash)
+            existing_path = find_paper_pdf(str(existing["paper_id"])) if existing else None
+            if existing is not None and existing_path is not None:
+                metadata = read_paper_metadata(str(existing["paper_id"]))
+                return {
+                    "paper_id": str(existing["paper_id"]),
+                    "filename": str(metadata.get("filename") or existing["filename"]),
+                    "file_path": str(existing_path),
+                    "paper_language": str(metadata.get("paper_language") or paper_language),
+                    "reused": True,
+                }
+            if existing is not None:
+                repository.delete(str(existing["paper_id"]))
 
-    save_paper_metadata(
-        paper_id,
-        {
-            "paper_id": paper_id,
-            "filename": filename,
-            "file_path": str(target_path),
-            "paper_language": paper_language,
-        },
-    )
-
-    return {
-        "paper_id": paper_id,
-        "filename": filename,
-        "file_path": str(target_path),
-        "paper_language": paper_language,
-    }
+            paper_id = generate_paper_id()
+            moved_path = PAPERS_DIR / f"{paper_id}_{filename}"
+            os.replace(temp_path, moved_path)
+            save_paper_metadata(
+                paper_id,
+                {
+                    "paper_id": paper_id,
+                    "filename": filename,
+                    "file_path": str(moved_path),
+                    "paper_language": paper_language,
+                },
+            )
+            try:
+                repository.create(paper_id, content_hash, filename, str(moved_path))
+            except sqlite3.IntegrityError:
+                moved_path.unlink(missing_ok=True)
+                moved_path = None
+                _paper_metadata_path(paper_id).unlink(missing_ok=True)
+                existing = repository.find_by_hash(content_hash)
+                if existing is None or find_paper_pdf(str(existing["paper_id"])) is None:
+                    raise
+                return {
+                    "paper_id": str(existing["paper_id"]),
+                    "filename": str(existing["filename"]),
+                    "file_path": str(find_paper_pdf(str(existing["paper_id"]))),
+                    "paper_language": paper_language,
+                    "reused": True,
+                }
+            return {
+                "paper_id": paper_id,
+                "filename": filename,
+                "file_path": str(moved_path),
+                "paper_language": paper_language,
+                "reused": False,
+            }
+    except Exception:
+        if moved_path is not None and moved_path.exists():
+            moved_path.unlink()
+        if paper_id is not None:
+            _paper_metadata_path(paper_id).unlink(missing_ok=True)
+        raise
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def find_paper_pdf(paper_id: str) -> Path | None:
@@ -177,6 +235,8 @@ def delete_paper_data(paper_id: str) -> bool:
         if isinstance(payload, dict) and payload.get("paper_id") == paper_id:
             path.unlink()
             deleted = True
+    if deleted:
+        PaperRepository().delete(paper_id)
     return deleted
 
 

@@ -161,6 +161,8 @@ def run_agent(
             # Only provider-visible assistant content is emitted here; hidden
             # reasoning fields are never part of AgentLLMResponse.
             emit("llm_message", step=context.step, content=response.content)
+            if response.content.strip():
+                emit("assistant_trace", step=context.step, content=response.content)
 
             if not response.tool_calls:
                 emit("final_start", step=context.step)
@@ -187,6 +189,7 @@ def run_agent(
                 trace=trace,
                 step=context.step,
                 event_sink=emit_runtime,
+                context=context,
             ):
                 context.messages.append(
                     {

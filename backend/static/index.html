@@ -24,6 +24,12 @@
     .markdown-body th { background: #eff6ff; color: #1e3a8a; }
     .chat-scrollbar::-webkit-scrollbar { width: 8px; }
     .chat-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+    .session-delete-button { opacity: 0; pointer-events: none; transform: translateX(2px) scale(.96); transition: opacity .14s ease, transform .14s ease, background-color .14s ease, color .14s ease; }
+    .session-row:hover .session-delete-button, .session-row:focus-within .session-delete-button { opacity: .82; pointer-events: auto; transform: translateX(0) scale(1); }
+    .session-delete-button:hover, .session-delete-button:focus-visible { background: rgba(244, 63, 94, .14); color: #fda4af; opacity: 1; }
+    .session-delete-button:active { transform: scale(.92); }
+    .session-delete-tooltip { position: absolute; top: 50%; right: calc(100% + 8px); z-index: 10; border: 1px solid rgba(255, 255, 255, .12); border-radius: .375rem; background: #111827; box-shadow: 0 6px 16px rgba(0, 0, 0, .25); color: #e5e7eb; font-size: .75rem; line-height: 1; opacity: 0; padding: .35rem .5rem; pointer-events: none; transform: translate(2px, -50%); transition: opacity .14s ease, transform .14s ease; white-space: nowrap; }
+    .session-delete-button:hover .session-delete-tooltip, .session-delete-button:focus-visible .session-delete-tooltip { opacity: 1; transform: translate(0, -50%); }
   </style>
 </head>
 <body class="h-screen overflow-hidden bg-white text-slate-900">
@@ -46,11 +52,6 @@
       <nav id="conversationList" class="chat-scrollbar flex-1 space-y-1 overflow-y-auto p-2"></nav>
 
       <div class="border-t border-white/10 p-3">
-        <label class="mb-2 block text-xs text-slate-400" for="paperLanguage">论文语言</label>
-        <select id="paperLanguage" class="mb-3 h-9 w-full rounded-md border border-white/10 bg-[#2a2b32] px-2 text-sm text-slate-100 outline-none focus:border-blue-500">
-          <option value="zh">中文</option>
-          <option value="en">英文</option>
-        </select>
         <button type="button" class="flex h-10 w-full items-center justify-start gap-2 rounded-md px-3 text-sm text-slate-300 hover:bg-white/10">
           <span>⚙️</span>
           设置
@@ -139,7 +140,6 @@
     const arxivMenuItem = document.getElementById("arxivMenuItem");
     const pdfInput = document.getElementById("pdfInput");
     const topLoading = document.getElementById("topLoading");
-    const paperLanguage = document.getElementById("paperLanguage");
     const uploadProgressWrap = document.getElementById("uploadProgressWrap");
     const uploadProgressText = document.getElementById("uploadProgressText");
     const uploadProgressValue = document.getElementById("uploadProgressValue");
@@ -150,6 +150,8 @@
 
     let conversations = [];
     let activeSessionId = "";
+    let isGenerating = false;
+    const CURRENT_SESSION_STORAGE_KEY = "paperpilot_current_session_id";
 
     marked.setOptions({
       breaks: true,
@@ -172,9 +174,20 @@
       return conversations.find((item) => item.sessionId === activeSessionId);
     }
 
-    function makeTitleFromText(text) {
-      const cleaned = text.replace(/\s+/g, " ").trim();
-      return cleaned ? cleaned.slice(0, 20) : "新的论文对话";
+    function saveCurrentSessionId() {
+      try {
+        localStorage.setItem(CURRENT_SESSION_STORAGE_KEY, activeSessionId);
+      } catch {
+        // Browsers with disabled storage still keep the current in-memory session.
+      }
+    }
+
+    function clearSavedSessionId() {
+      try {
+        localStorage.removeItem(CURRENT_SESSION_STORAGE_KEY);
+      } catch {
+        // Ignore disabled browser storage.
+      }
     }
 
     function setLoading(isLoading, text = "") {
@@ -208,17 +221,31 @@
     function renderConversationList() {
       conversationList.innerHTML = "";
       conversations.forEach((conversation) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = [
-          "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition",
+        const row = document.createElement("div");
+        row.className = [
+          "session-row group flex min-h-9 w-full items-center gap-1 rounded-lg px-2 py-1 transition-colors",
           conversation.sessionId === activeSessionId
             ? "bg-white/15 text-white"
             : "text-slate-300 hover:bg-white/10 hover:text-white"
         ].join(" ");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.disabled = isGenerating;
+        button.className = "flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1.5 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-white/30 disabled:cursor-not-allowed";
         button.innerHTML = `<span class="shrink-0">💬</span><span class="truncate">${escapeHtml(conversation.title)}</span>`;
         button.addEventListener("click", () => switchConversation(conversation.sessionId));
-        conversationList.appendChild(button);
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.setAttribute("aria-label", "删除对话");
+        deleteButton.disabled = isGenerating;
+        deleteButton.className = "session-delete-button relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-500 outline-none focus-visible:ring-2 focus-visible:ring-rose-200/50 disabled:cursor-not-allowed disabled:opacity-30";
+        deleteButton.innerHTML = `<svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg><span class="session-delete-tooltip" role="tooltip" aria-hidden="true">删除对话</span>`;
+        deleteButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          deleteConversation(conversation.sessionId);
+        });
+        row.append(button, deleteButton);
+        conversationList.appendChild(row);
       });
     }
 
@@ -283,26 +310,46 @@
             activity.className = "mb-3 space-y-1 rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500";
             const title = document.createElement("div");
             title.className = "font-semibold text-slate-700";
-            title.textContent = "Agent Runtime";
+            title.textContent = "Agent 执行过程";
             activity.appendChild(title);
+            const tracedSteps = new Set(message.activity
+              .filter((entry) => entry.type === "assistant_trace")
+              .map((entry) => entry.step));
+            const successfulToolCalls = new Set(message.activity
+              .filter((entry) => entry.type === "tool_result" && entry.success)
+              .map((entry) => entry.toolCallId));
             message.activity.forEach((entry) => {
               const item = document.createElement("div");
               if (entry.type === "agent") {
-                item.textContent = entry.status === "completed" ? "✓ Agent 执行完成" : "⏳ Agent 已启动";
+                item.className = entry.status === "completed" ? "text-emerald-600" : entry.status === "error" ? "text-rose-600" : "";
+                item.textContent = entry.status === "completed" ? "✓ Agent 执行完成" : entry.status === "error" ? "⚠ Agent 执行失败" : "⏳ Agent 已启动";
               } else if (entry.type === "step") {
                 item.className = "pt-1 font-semibold text-slate-700";
                 item.textContent = `Step ${entry.step}`;
               } else if (entry.type === "llm") {
+                if (tracedSteps.has(entry.step)) {
+                  return;
+                }
+                item.className = entry.status === "completed" ? "text-emerald-600" : "";
                 item.textContent = entry.status === "completed"
                   ? "✓ LLM 已生成下一步操作"
                   : entry.status === "recovery"
                     ? "⏳ Agent 正在尝试恢复..."
-                  : "⏳ 正在分析请求...";
+                    : "⏳ 正在分析请求...";
+              } else if (entry.type === "assistant_trace") {
+                const traceTitle = document.createElement("div");
+                traceTitle.className = "font-semibold text-slate-700";
+                traceTitle.textContent = "LLM:";
+                const traceContent = document.createElement("div");
+                traceContent.className = "whitespace-pre-wrap text-slate-600";
+                traceContent.textContent = entry.content;
+                item.append(traceTitle, traceContent);
               } else if (entry.type === "final") {
+                item.className = entry.status === "completed" ? "text-emerald-600" : "";
                 item.textContent = entry.status === "completed" ? "✓ 回答生成完成" : "⏳ 正在生成回答...";
               } else if (entry.type === "tool_call") {
                 const title = document.createElement("div");
-                title.className = "font-semibold text-slate-700";
+                title.className = `font-semibold ${successfulToolCalls.has(entry.toolCallId) ? "text-emerald-600" : "text-slate-700"}`;
                 title.textContent = `✓ Tool Call: ${entry.name}`;
                 const argumentsView = document.createElement("pre");
                 argumentsView.className = "mt-1 overflow-x-auto rounded bg-slate-100 p-2 text-[11px] leading-4 text-slate-700";
@@ -311,9 +358,10 @@
               } else if (entry.type === "tool_start") {
                 const prefix = entry.status === "error" ? "⚠" : entry.status === "completed" ? "✓" : "⏳";
                 const action = entry.status === "running" ? "正在执行" : entry.status === "error" ? "执行失败" : "执行完成";
+                item.className = entry.status === "completed" ? "text-emerald-600" : entry.status === "error" ? "text-rose-600" : "";
                 item.textContent = `${prefix} ${action}: ${entry.name}`;
               } else if (entry.type === "tool_result") {
-                item.innerHTML = `<span class="font-semibold text-slate-700">${entry.success ? "✓" : "⚠"} Tool Result: ${escapeHtml(entry.name)}</span><br>${escapeHtml(entry.summary)}`;
+                item.innerHTML = `<span class="font-semibold ${entry.success ? "text-emerald-600" : "text-rose-600"}">${entry.success ? "✓" : "⚠"} Tool Result: ${escapeHtml(entry.name)}</span><br>${escapeHtml(entry.summary)}`;
               } else {
                 item.textContent = `⚠ ${entry.content}`;
               }
@@ -357,6 +405,9 @@
     }
 
     async function newConversation() {
+      if (isGenerating) {
+        return;
+      }
       const previousConversation = getActiveConversation();
       let cleanupError = "";
       if (previousConversation?.pendingAttachment) {
@@ -372,39 +423,35 @@
       const sessionId = createUuid();
       conversations.unshift({
         sessionId,
-        title: "新的论文对话",
+        title: "新对话",
         paperId: null,
+        activePaperIds: [],
         pendingAttachment: null,
         messages: []
       });
       activeSessionId = sessionId;
+      saveCurrentSessionId();
       updateCurrentTitle();
       renderConversationList();
       renderMessages();
       renderPendingAttachment();
-    }
-
-    function switchConversation(sessionId) {
-      activeSessionId = sessionId;
-      updateCurrentTitle();
-      renderConversationList();
-      renderMessages();
-      renderPendingAttachment();
+      try {
+        const response = await fetch("/api/chat/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId })
+        });
+        if (!response.ok) {
+          throw new Error("创建会话失败。");
+        }
+      } catch (error) {
+        statusText.textContent = error.message || "创建会话失败。";
+      }
     }
 
     function updateCurrentTitle() {
       const conversation = getActiveConversation();
-      currentTitle.textContent = conversation ? conversation.title : "新的论文对话";
-    }
-
-    function updateConversationTitle(title) {
-      const conversation = getActiveConversation();
-      if (!conversation) {
-        return;
-      }
-      conversation.title = makeTitleFromText(title);
-      updateCurrentTitle();
-      renderConversationList();
+      currentTitle.textContent = conversation ? conversation.title : "新对话";
     }
 
     function addMessage(role, content, options = {}) {
@@ -422,11 +469,6 @@
         activityCollapsed: Boolean(options.activityCollapsed)
       };
       conversation.messages.push(message);
-      if (role === "user" && conversation.title === "新的论文对话") {
-        conversation.title = makeTitleFromText(content);
-        updateCurrentTitle();
-        renderConversationList();
-      }
       renderMessages();
       return message;
     }
@@ -529,7 +571,7 @@
       }
     }
 
-    function applyAgentEvent(messageId, event) {
+    function applyEventToConversationState(messageId, event) {
       switch (event.type) {
         case "agent_start":
           addRuntimeActivity(messageId, { type: "agent", status: "running" });
@@ -542,6 +584,14 @@
             type: "llm",
             step: event.step,
             status: previousToolFailed(messageId) ? "recovery" : "running"
+          });
+          break;
+        case "assistant_trace":
+          setRuntimeStatus(messageId, "llm", "completed");
+          addRuntimeActivity(messageId, {
+            type: "assistant_trace",
+            step: event.step,
+            content: event.content || ""
           });
           break;
         case "tool_call":
@@ -565,6 +615,7 @@
           setRuntimeStatus(messageId, "tool_start", event.success ? "completed" : "error", event.tool_call_id);
           addRuntimeActivity(messageId, {
             type: "tool_result",
+            toolCallId: event.tool_call_id,
             name: event.name,
             success: event.success === true,
             summary: event.summary || ""
@@ -579,14 +630,212 @@
           appendMessageContent(messageId, event.delta || "");
           break;
         case "error":
-          addRuntimeActivity(messageId, { type: "error", content: "Agent 执行失败" });
+          addRuntimeActivity(messageId, { type: "error", content: event.content || "Agent 执行失败" });
           break;
         case "agent_done":
           setRuntimeStatus(messageId, "final", "completed");
-          setRuntimeStatus(messageId, "agent", "completed");
+          setRuntimeStatus(messageId, "agent", event.status === "error" ? "error" : "completed");
           updateMessage(messageId, { loading: false });
           break;
       }
+    }
+
+    function replayPersistedEvents(events, incompleteTurnIds) {
+      const assistantByTurn = new Map();
+      const endedTurns = new Set();
+      events.forEach((event) => {
+        const data = event.data || {};
+        const turnId = event.turn_id;
+        if (event.event_type === "user/message") {
+          addMessage("user", data.content || "");
+          const assistant = addMessage("assistant", "", { loading: true, activityCollapsed: true });
+          if (turnId) {
+            assistantByTurn.set(turnId, assistant.id);
+          }
+          return;
+        }
+        const messageId = assistantByTurn.get(turnId);
+        if (!messageId) {
+          return;
+        }
+        switch (event.event_type) {
+          case "step/start":
+            applyEventToConversationState(messageId, { type: "step_start", step: event.step });
+            break;
+          case "assistant/trace":
+            applyEventToConversationState(messageId, { type: "assistant_trace", step: event.step, content: data.content || "" });
+            break;
+          case "tool/call":
+            applyEventToConversationState(messageId, {
+              type: "tool_call", tool_call_id: data.tool_call_id, name: data.name, arguments: data.arguments || {}
+            });
+            break;
+          case "tool/result":
+            applyEventToConversationState(messageId, {
+              type: "tool_result", tool_call_id: data.tool_call_id, name: data.name,
+              success: data.status === "success", summary: data.summary || ""
+            });
+            break;
+          case "assistant/message":
+            updateMessage(messageId, { content: data.content || "", loading: false }, false);
+            break;
+          case "error":
+            applyEventToConversationState(messageId, { type: "error", content: data.message || "Agent 执行失败" });
+            break;
+          case "turn/end":
+            endedTurns.add(turnId);
+            applyEventToConversationState(messageId, { type: "agent_done", status: data.status });
+            break;
+        }
+      });
+      new Set(incompleteTurnIds || []).forEach((turnId) => {
+        const messageId = assistantByTurn.get(turnId);
+        if (messageId && !endedTurns.has(turnId)) {
+          applyEventToConversationState(messageId, { type: "error", content: "该轮执行未完整结束" });
+          updateMessage(messageId, { loading: false }, false);
+        }
+      });
+    }
+
+    function applySessionHistory(sessions) {
+      const existing = new Map(conversations.map((conversation) => [conversation.sessionId, conversation]));
+      conversations = sessions.map((session) => {
+        const previous = existing.get(session.session_id);
+        return {
+          sessionId: session.session_id,
+          title: session.title || "新对话",
+          paperId: session.current_paper_id || null,
+          activePaperIds: previous?.activePaperIds || [],
+          pendingAttachment: previous?.pendingAttachment || null,
+          messages: previous?.messages || []
+        };
+      });
+    }
+
+    async function refreshSessionHistory() {
+      const response = await fetch("/api/chat/sessions");
+      if (!response.ok) {
+        throw new Error("加载会话列表失败。");
+      }
+      const payload = await parseJsonResponse(response);
+      applySessionHistory(Array.isArray(payload.sessions) ? payload.sessions : []);
+      renderConversationList();
+      return conversations;
+    }
+
+    async function restoreConversation(sessionId) {
+      const response = await fetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}`);
+      if (response.status === 404) {
+        return false;
+      }
+      if (!response.ok) {
+        throw new Error("恢复会话失败。");
+      }
+      const payload = await parseJsonResponse(response);
+      const session = payload.session || {};
+      const restoredConversation = {
+        sessionId: session.session_id,
+        title: session.title || conversations.find((item) => item.sessionId === session.session_id)?.title || "新对话",
+        paperId: session.current_paper_id || null,
+        activePaperIds: Array.isArray(session.active_paper_ids) ? session.active_paper_ids : [],
+        pendingAttachment: null,
+        messages: []
+      };
+      const existingIndex = conversations.findIndex((item) => item.sessionId === session.session_id);
+      if (existingIndex === -1) {
+        conversations.unshift(restoredConversation);
+      } else {
+        conversations.splice(existingIndex, 1, restoredConversation);
+      }
+      activeSessionId = session.session_id;
+      replayPersistedEvents(Array.isArray(payload.events) ? payload.events : [], payload.incomplete_turn_ids);
+      saveCurrentSessionId();
+      updateCurrentTitle();
+      renderConversationList();
+      renderMessages();
+      renderPendingAttachment();
+      return true;
+    }
+
+    async function switchConversation(sessionId) {
+      if (isGenerating || sessionId === activeSessionId) {
+        return;
+      }
+      try {
+        await restoreConversation(sessionId);
+      } catch (error) {
+        statusText.textContent = error.message || "切换会话失败。";
+      }
+    }
+
+    async function selectNextConversation() {
+      const nextSessionId = conversations[0]?.sessionId;
+      if (nextSessionId) {
+        await restoreConversation(nextSessionId);
+        return;
+      }
+      activeSessionId = "";
+      clearSavedSessionId();
+      renderConversationList();
+      renderMessages();
+      renderPendingAttachment();
+      await newConversation();
+    }
+
+    async function deleteConversation(sessionId) {
+      if (isGenerating) {
+        statusText.textContent = "当前对话正在生成，请等待完成后再删除。";
+        return;
+      }
+      if (!confirm("确定删除这个对话吗？")) {
+        return;
+      }
+      const deletingCurrent = sessionId === activeSessionId;
+      try {
+        const response = await fetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+        if (!response.ok && response.status !== 404) {
+          throw new Error("删除对话失败，请重试。");
+        }
+        conversations = conversations.filter((conversation) => conversation.sessionId !== sessionId);
+        if (deletingCurrent) {
+          await selectNextConversation();
+        } else {
+          renderConversationList();
+        }
+      } catch (error) {
+        statusText.textContent = error.message || "删除对话失败，请重试。";
+      }
+    }
+
+    async function initializeConversation() {
+      let savedSessionId = "";
+      try {
+        savedSessionId = localStorage.getItem(CURRENT_SESSION_STORAGE_KEY) || "";
+      } catch {
+        // Fall through to a fresh in-memory session.
+      }
+      let sessions = [];
+      try {
+        sessions = await refreshSessionHistory();
+      } catch (error) {
+        statusText.textContent = error.message || "加载会话列表失败。";
+      }
+      const selectedSessionId = sessions.some((session) => session.sessionId === savedSessionId)
+        ? savedSessionId
+        : sessions[0]?.sessionId || "";
+      if (selectedSessionId) {
+        try {
+          if (await restoreConversation(selectedSessionId)) {
+            return;
+          }
+        } catch (error) {
+          statusText.textContent = error.message || "恢复会话失败。";
+        }
+        if (savedSessionId) {
+          clearSavedSessionId();
+        }
+      }
+      await newConversation();
     }
 
     async function sendChatMessage() {
@@ -600,6 +849,9 @@
       const paperId = pendingAttachment?.paperId || conversation?.paperId || null;
       if (pendingAttachment && conversation?.pendingAttachment === pendingAttachment) {
         conversation.paperId = pendingAttachment.paperId;
+        if (!conversation.activePaperIds.includes(pendingAttachment.paperId)) {
+          conversation.activePaperIds.push(pendingAttachment.paperId);
+        }
         conversation.pendingAttachment = null;
         renderPendingAttachment();
       }
@@ -607,8 +859,10 @@
       resizeTextarea();
       addMessage("user", text, { attachment: sentAttachment });
       const assistantMessage = addMessage("assistant", "", { loading: true });
+      const streamSessionId = activeSessionId;
 
       try {
+        isGenerating = true;
         setLoading(true, "正在生成回复");
         let agentDone = false;
         const response = await fetch("/api/chat/stream", {
@@ -625,11 +879,18 @@
           throw new Error(data.detail || "聊天请求失败。");
         }
         await readSse(response, (event) => {
-          applyAgentEvent(assistantMessage.id, event);
+          if (activeSessionId === streamSessionId) {
+            applyEventToConversationState(assistantMessage.id, event);
+          }
           agentDone ||= event.type === "agent_done";
         });
         if (!agentDone) {
           throw new Error("流式响应意外结束。");
+        }
+        try {
+          await refreshSessionHistory();
+        } catch (error) {
+          statusText.textContent = error.message || "刷新会话列表失败。";
         }
       } catch (error) {
         updateMessage(assistantMessage.id, {
@@ -637,6 +898,7 @@
           loading: false
         });
       } finally {
+        isGenerating = false;
         setLoading(false);
       }
     }
@@ -645,7 +907,6 @@
       return new Promise((resolve, reject) => {
         const formData = new FormData();
         formData.append("file", file);
-        formData.append("paper_language", paperLanguage.value || "zh");
 
         const xhr = new XMLHttpRequest();
         xhr.open("POST", "/api/papers/upload");
@@ -685,6 +946,13 @@
     async function deletePendingAttachment(conversation) {
       const attachment = conversation?.pendingAttachment;
       if (!attachment) {
+        return;
+      }
+      if (attachment.reused) {
+        if (conversation.pendingAttachment === attachment) {
+          conversation.pendingAttachment = null;
+        }
+        renderPendingAttachment();
         return;
       }
       const response = await fetch(`/api/papers/${encodeURIComponent(attachment.paperId)}`, {
@@ -742,7 +1010,8 @@
         if (conversation) {
           conversation.pendingAttachment = {
             paperId,
-            filename: uploadData.filename || file.name
+            filename: uploadData.filename || file.name,
+            reused: uploadData.reused === true
           };
         }
         renderPendingAttachment();
@@ -797,7 +1066,7 @@
       }
     });
 
-    newConversation();
+    initializeConversation();
   </script>
 </body>
 </html>

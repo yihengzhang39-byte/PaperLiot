@@ -1,7 +1,7 @@
 # User Profile
 university: 江南大学
 education: 本科
-identity: 人工智能方向本科生
+identity: ly（人工智能方向本科生）
 research_interest:
   - 目标检测
   - 小目标检测

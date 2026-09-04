@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import CHAT_SESSIONS_DIR, get_session_config
+from app.repositories.session_repository import SessionRepository
+from app.services.persistence_migration import migrate_legacy_sessions
 
 
 @dataclass
@@ -25,6 +27,10 @@ def _session_path(session_id: str, storage_dir: Path | None = None) -> Path:
         raise ValueError("session_id must be a non-empty string up to 512 characters")
     digest = hashlib.sha256(session_id.strip().encode("utf-8")).hexdigest()
     return (storage_dir or CHAT_SESSIONS_DIR) / f"{digest}.json"
+
+
+def _database_path(storage_dir: Path | None) -> Path | None:
+    return (storage_dir.parent / "paperpilot.db") if storage_dir is not None else None
 
 
 def trim_history(messages: list[dict[str, Any]], max_messages: int | None = None) -> list[dict[str, str]]:
@@ -58,23 +64,31 @@ def normalize_active_paper_ids(paper_ids: list[Any], current_paper_id: str | Non
 
 
 def load_session(session_id: str, *, storage_dir: Path | None = None) -> ChatSessionState | None:
-    """Load a session when its hashed JSON file is present and valid."""
+    """Load JSON messages plus the SQLite session header and paper relations."""
     path = _session_path(session_id, storage_dir)
-    if not path.exists():
-        return None
+    database_path = _database_path(storage_dir)
+    migrate_legacy_sessions(database_path=database_path, chat_sessions_dir=storage_dir)
+    repository = SessionRepository(database_path)
+    header = repository.get(session_id.strip())
+    payload: dict[str, Any] = {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if payload and payload.get("session_id") != session_id.strip():
         return None
-    if not isinstance(payload, dict) or payload.get("session_id") != session_id.strip():
+    if header is None and not payload:
         return None
-    paper_id = payload.get("paper_id")
+    paper_id = header.get("current_paper_id") if header else payload.get("paper_id")
     normalized_paper_id = paper_id.strip() if isinstance(paper_id, str) and paper_id.strip() else None
+    active_papers = repository.get_active_papers(session_id.strip()) if header else []
     return ChatSessionState(
         messages=trim_history(payload.get("messages", [])),
         paper_id=normalized_paper_id,
-        active_paper_ids=normalize_active_paper_ids(payload.get("active_paper_ids", []), normalized_paper_id),
-        updated_at=str(payload.get("updated_at", "")),
+        active_paper_ids=normalize_active_paper_ids(active_papers or payload.get("active_paper_ids", []), normalized_paper_id),
+        updated_at=str(header.get("updated_at") if header else payload.get("updated_at", "")),
     )
 
 
@@ -104,4 +118,11 @@ def save_session(
         ),
         encoding="utf-8",
     )
+    database_path = _database_path(storage_dir)
+    migrate_legacy_sessions(database_path=database_path, chat_sessions_dir=storage_dir)
+    repository = SessionRepository(database_path)
+    repository.get_or_create(session_id.strip(), updated_at=state.updated_at)
+    repository.set_current_paper(session_id.strip(), state.paper_id)
+    for paper_id in state.active_paper_ids:
+        repository.add_paper(session_id.strip(), paper_id)
     return path

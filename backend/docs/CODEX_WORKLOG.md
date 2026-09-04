@@ -41,6 +41,262 @@ This file records important Codex work sessions, decisions, and handoff notes.
 
 ## Recent Work
 
+### 2026-09-04 - Sidebar Delete Action Polish
+
+**Goal:**
+
+将 sidebar 的会话删除入口改成随 row hover 平滑出现的轻量危险操作，保持既有删除语义。
+
+**Files changed:**
+
+- `static/index.html`、`scripts/test_agent_runtime_ui.py`
+
+**Decisions made:**
+
+- 使用内联 SVG 垃圾桶、原生 CSS transition 和自定义暗色 tooltip；不引入图标库或前端框架。
+- 保留原有 confirm、DELETE 请求、生成期禁用与 click `stopPropagation`，不改会话/持久化逻辑。
+
+**Validation:**
+
+- `test_agent_runtime_ui`、inline JavaScript syntax check 及 `git diff --check` 通过。
+
+---
+
+### 2026-09-04 - Transactional Conversation Deletion
+
+**Goal:**
+
+为 sidebar 每条 session 增加安全删除入口，只清理该 session 的 metadata、event log 和 paper relation。
+
+**Files changed:**
+
+- `app/repositories/session_repository.py`、`app/services/session_restore_service.py`
+- `app/api/routes/chat.py`、`static/index.html`
+- `scripts/test_session_delete.py`、`test_agent_runtime_ui.py`、`test_chat_agent_integration.py`
+
+**Decisions made:**
+
+- SQLite 现有 schema 没有 session 外键级联，因此 `SessionRepository.delete` 使用一个 `BEGIN IMMEDIATE` transaction，按 events、relations、session 顺序显式删除；不触及 `papers` 或 filesystem。
+- `DELETE /api/chat/sessions/{session_id}` 对不存在 session 返回 404；前端将 404 当作 stale sidebar 状态并移除本地条目。
+- 删除按钮在 sidebar row hover 时出现，stopPropagation 防止切换；生成期间禁用删除/切换，新 session 在删除最后一条后自动创建。
+
+**Validation:**
+
+- `test_session_delete`、`test_session_history`、`test_session_restore`、`test_session_event_persistence`、`test_sqlite_persistence`、`test_session_persistence`、`test_chat_agent_integration`、`test_agent_streaming`、`test_agent_runtime_ui`、`test_paper_agent`、`test_agent_loop`、`test_tool_runtime`、`test_tool_contract`、`test_tool_concurrency`、inline JavaScript syntax check 及 `git diff --check` 通过。
+
+---
+
+### 2026-09-04 - Persistent Session History List and Titles
+
+**Goal:**
+
+让 SQLite 持久化 sidebar 会话列表与首条用户消息标题，F5 恢复所有历史会话而非仅当前会话。
+
+**Files changed:**
+
+- `app/services/sqlite_service.py`、`app/repositories/session_repository.py`、`session_event_repository.py`
+- `app/services/session_restore_service.py`、`session_event_service.py`、`app/api/routes/chat.py`
+- `static/index.html`、`scripts/test_session_history.py`、`test_session_restore.py`、`test_agent_runtime_ui.py`
+
+**Decisions made:**
+
+- `sessions.title` 由幂等 `ALTER TABLE` 迁移；后端统一用首条有效 user message 生成最多 40 字的标题，不调用 LLM。
+- `GET /api/chat/sessions` 只返回按 `updated_at DESC` 排序的 metadata；一次性 backfill 只补空 title，且不更新历史 session 的 `updated_at`。
+- F5 先加载 sidebar，再以 localStorage 当前 pointer 优先选择 detail restore；生成期间禁止切换/新建，并按启动 session_id 过滤 SSE UI 更新。
+
+**Validation:**
+
+- `test_session_history`、`test_session_restore`、`test_session_event_persistence`、`test_sqlite_persistence`、`test_session_persistence`、`test_chat_agent_integration`、`test_agent_streaming`、`test_agent_runtime_ui`、`test_paper_agent`、`test_agent_loop`、`test_tool_runtime`、`test_tool_contract`、`test_tool_concurrency`、inline JavaScript syntax check 及 `git diff --check` 通过。
+
+---
+
+### 2026-09-04 - Session Restore and F5 Event Replay
+
+**Goal:**
+
+让浏览器 F5 通过 SQLite `session_events` 恢复当前会话、论文绑定和可展开的 Agent 执行过程。
+
+**Files changed:**
+
+- `app/services/session_restore_service.py`
+- `app/api/routes/chat.py`、`app/services/session_event_service.py`
+- `static/index.html`、`scripts/test_session_restore.py`、`scripts/test_agent_runtime_ui.py`
+
+**Decisions made:**
+
+- `GET /api/chat/sessions/{session_id}` 只读读取 `sessions`、`session_papers`、`session_events`；事件保持 `seq ASC`，不会写入 event log。
+- localStorage 只保存 `paperpilot_current_session_id`。前端把持久化事件映射到既有 `applyEventToConversationState` 渲染路径，不存聊天正文到浏览器。
+- 新建对话建立空 session header；未闭合的 `turn/start` 被标记为“该轮执行未完整结束”，不重跑 Agent 或 Tool。
+
+**Validation:**
+
+- `test_session_restore`、`test_session_event_persistence`、`test_sqlite_persistence`、`test_session_persistence`、`test_chat_agent_integration`、`test_agent_streaming`、`test_agent_runtime_ui`、`test_paper_agent`、`test_agent_loop`、`test_tool_runtime`、`test_tool_contract`、`test_tool_concurrency`、inline JavaScript syntax check 及 `git diff --check` 通过。
+
+---
+
+### 2026-09-04 - SQLite Agent Runtime Semantic Events
+
+**Goal:**
+
+将 `/api/chat` 与 `/api/chat/stream` 的 Paper Agent runtime 事件选择性写入 SQLite `session_events`，不做 F5 replay。
+
+**Files changed:**
+
+- `app/services/session_event_service.py`
+- `app/api/routes/chat.py`
+- `scripts/test_session_event_persistence.py`
+
+**Decisions made:**
+
+- `SessionEventService` 生成每次发送独立的 `turn_id`，在 route 与 Runtime 之间映射语义事件；Agent Loop 与 Tool Runtime 不依赖 SQLite。
+- 仅保存 user/message、turn/start、step/start、assistant/trace、tool/call、tool/result、step/end、assistant/message、turn/end、error；SSE transport events（含每个 `final_delta`）不落库。
+- Tool result 只保存安全摘要；参数递归截断并过滤常见凭据字段。并发 Tool result 在 `step/end` 按原始 tool-call 顺序落库。
+
+**Validation:**
+
+- `test_session_event_persistence`、`test_sqlite_persistence`、`test_session_persistence`、`test_chat_agent_integration`、`test_paper_agent`、`test_agent_loop`、`test_tool_runtime`、`test_tool_contract`、`test_tool_concurrency` 及 `git diff --check` 通过；未调用真实 LLM 或外网。
+
+---
+
+### 2026-09-04 - SQLite Persistence Foundation
+
+**Goal:**
+
+增加 SQLite 的 paper identity、session header/relations 与 append-only event 基础层，不迁移 PDF 或 Agent Runtime。
+
+**Files changed:**
+
+- `app/services/sqlite_service.py`、`app/services/persistence_migration.py`
+- `app/repositories/paper_repository.py`、`session_repository.py`、`session_event_repository.py`
+- `app/services/file_service.py`、`app/services/session_service.py`、`app/core/config.py`
+- `scripts/test_sqlite_persistence.py` 及既有 hash/delete 回归脚本
+
+**Decisions made:**
+
+- SQLite 为 SHA-256 → `paper_id` 的权威来源；旧 `paper_index.json` 与 session JSON 保留为一次性迁移和消息兼容来源。
+- PDF、parser cache、chunks 和大型 JSON 继续在 filesystem；session JSON 继续保留 bounded semantic history。
+- `session_events` 仅建立 Repository 能力，未接入 Agent event 流，因而不持久化 delta 或 hidden reasoning。
+
+**Validation:**
+
+- `test_sqlite_persistence`、`test_session_persistence`、`test_paper_hash_dedup`、`test_paper_delete`、`test_chat_agent_integration`、`test_agent_loop`、`test_tool_runtime`、`test_paper_tools`、`test_retrieval`、`test_tool_contract` 及 `git diff --check` 通过。
+
+---
+
+### 2026-09-04 - SHA-256 PDF Deduplication and Stable Paper IDs
+
+**Goal:**
+
+让完全相同的 PDF bytes 持久化复用同一 canonical `paper_id` 与既有缓存。
+
+**Files changed:**
+
+- `app/services/file_service.py`、`app/core/config.py`、`app/schemas/paper.py`、`app/api/routes/paper.py`
+- `static/index.html`、`scripts/test_paper_hash_dedup.py`、`scripts/test_paper_delete.py`
+
+**Decisions made:**
+
+- 上传流式写入临时文件时计算 SHA-256；`storage/paper_index.json` 原子保存 hash 到 canonical `paper_id` 的映射。
+- index 缺失时一次性回填历史 UUID 前缀 PDF；stale mapping 被忽略并用当前上传重建。
+- 单进程锁保护同 hash 同时上传；重复上传的 pending 附件只解绑，不触发 canonical Paper 删除。
+
+**Validation:**
+
+- `test_paper_hash_dedup`、`test_paper_delete`、`test_paper_tools`、`test_retrieval`、`test_chat_agent_integration`、`test_tool_contract`、`test_agent_loop`、`test_paper_agent` 及 `git diff --check` 通过。
+
+---
+
+### 2026-09-04 - Bounded Tool Concurrency Scheduling
+
+**Goal:**
+
+在同一 Agent Step 内，仅并发执行明确声明安全的连续 Tool Call，并保留原始结果顺序。
+
+**Files changed:**
+
+- `app/runtime/tool_registry.py`、`app/runtime/tool_scheduler.py`、`app/runtime/tool_executor.py`
+- `app/core/config.py`、`.env.example`、`README.md`
+- `app/tools/paper_tools.py`、`scripts/test_tool_concurrency.py`
+
+**Decisions made:**
+
+- ToolDefinition 新增 `is_concurrency_safe(args)`；缺失、False、非严格 True、参数不可解析/绑定或 callback 异常都按 exclusive 处理。
+- 连续 safe 调用用有上限的线程池运行，exclusive 调用清空前池后单独执行；结果和 runtime trace 按 LLM 原始顺序返回。
+- 仅 `get_paper_info`、`extract_sections` 标记为 safe。检索可能写 chunk index，parser 写 parse cache，memory Tool 写文件，均保持 exclusive。
+
+**Validation:**
+
+- `test_tool_concurrency`、`test_tool_contract`、`test_tool_runtime`、`test_agent_loop`、`test_paper_agent`、`test_chat_agent_integration`、`test_paper_tools`、`test_retrieval`、`test_memory_service`、`test_multi_paper` 及 `git diff --check` 通过。
+
+---
+
+### 2026-09-04 - Observe Existing Paper State Before Parsing
+
+**Goal:**
+
+避免状态查询通过 parser 创建新缓存；优先读取当前 `paper_id` 已有 parser cache。
+
+**Files changed:**
+
+- `app/tools/paper_tools.py`
+- `app/agents/paper_agent.py`
+- `scripts/test_paper_agent.py`
+
+**Decisions made:**
+
+- `get_paper_info` 明确为只读 parser-cache 查询；parser Tool 明确为可能写 cache 的操作。
+- prompt 区分当前 `paper_id` cache 证据与 `memory.md` 的历史研究记录。
+- 不新增关键词硬编码、`depends_on` 或 Runtime 行为。
+
+**Validation:**
+
+- `test_paper_agent`、`test_agent_loop`、`test_tool_runtime`、`test_chat_agent_integration`、`test_paper_tools`、`test_memory_service` 及 `git diff --check` 通过。
+
+---
+
+### 2026-09-04 - Tool Contract + Step-aware Tool Selection
+
+**Goal:**
+
+为交互式 Paper Agent 增加 `requires` / `produces` 状态契约，并约束决策依赖的 Tool Call 跨 Step。
+
+**Files changed:**
+
+- `app/agents/agent_context.py`、`app/runtime/tool_registry.py`、`app/runtime/tool_executor.py`、`app/agents/agent_loop.py`
+- `app/tools/paper_tools.py`、`app/tools/memory_tools.py`、`app/tools/multi_paper_tools.py`、`app/agents/paper_agent.py`
+- `scripts/test_tool_contract.py`、`scripts/test_chat_agent_integration.py`
+
+**Decisions made:**
+
+- 注册表的 ToolDefinition 保存 `requires` / `produces`；`AgentContext.state` 仅保存当前运行中已知状态。
+- Executor 在 Tool dispatch 前检查 `requires`，成功结果才标记 `produces`；返回 `success: false` 的 parser 结果不产生状态。
+- 不增加 `depends_on`、并行调度、第二个 LLM planner 或另一套 Agent Loop。
+
+**Validation:**
+
+- `test_tool_contract`、`test_tool_runtime`、`test_agent_loop`、`test_paper_agent`、`test_chat_agent_integration`、`test_paper_tools`、`test_retrieval`、`test_multi_paper`、`test_memory_service` 及 `git diff --check` 通过。
+
+---
+
+### 2026-09-03 23:34 - 展示公开 LLM Assistant Trace
+
+**Goal:**
+
+在 Agent Runtime 中显示每步 LLM 返回的公开 `content`，不展示隐藏推理。
+
+**Files changed:**
+
+- `app/agents/agent_loop.py`：非空 `AgentLLMResponse.content` 在 Tool/Final 前发出 `assistant_trace`。
+- `static/index.html`：以“Agent 执行过程 / LLM:”渲染 trace，并保留 Tool 生命周期展示。
+- `scripts/test_agent_loop.py`、`test_agent_streaming.py`、`test_agent_runtime_ui.py`：覆盖 Tool/Final 顺序、空内容跳过、SSE 与 session 不持久化 trace。
+
+**Validation:**
+
+- `test_agent_loop`、`test_tool_runtime`、`test_paper_agent`、`test_chat_agent_integration`、`test_retrieval`、`test_session_persistence`、`test_agent_streaming`、`test_agent_runtime_ui` 通过。
+- JavaScript 语法检查和 `git diff --check` 通过；未调用真实 LLM 或外网。
+
+---
+
 ### 2026-09-03 22:32 - DSH 风格 Agent Runtime
 
 **Goal:**
@@ -918,5 +1174,35 @@ This file records important Codex work sessions, decisions, and handoff notes.
 - 待确认测试命令、lint/format 命令和 CI 规范。
 - 待确认当前业务代码和 storage 改动是否需要后续整理。
 - 待确认可选 parser adapter 的环境依赖与实际可用性。
+
+---
+
+### 2026-09-04 - Persistence C5: event-to-model-history projection
+
+**Goal:**
+
+Use completed SQLite session events as the authoritative prior-turn model history, while retaining full Tool results only for the current Agent run and persisting deterministic, bounded Tool facts for future turns.
+
+**Files changed:**
+
+- `app/runtime/tool_registry.py`, `app/runtime/tool_executor.py`
+- `app/tools/paper_tools.py`, `app/tools/memory_tools.py`, `app/tools/multi_paper_tools.py`
+- `app/services/session_event_service.py`, `app/services/session_model_history_service.py`
+- `app/api/routes/chat.py`, `app/agents/paper_agent.py`
+- `scripts/test_tool_history_projection.py`, `scripts/test_model_history_projection.py`
+- `scripts/test_session_event_persistence.py`, `scripts/test_chat_agent_integration.py`
+
+**Decisions made:**
+
+- Added an optional per-Tool `project_history_result` callback. It produces deterministic summaries for persistence; raw Tool payloads remain only in the active Agent run.
+- Project only prior turns that ended successfully. Preserve assistant Tool-call and matching Tool-result message pairs in provider-compatible order.
+- Both normal and streaming chat routes project prior model history from SQLite events. Legacy in-memory/JSON history remains for compatibility and session metadata, not as the provider-history source.
+- Long-term memory is explicitly distinct from current-session history in the Paper Agent prompt.
+
+**Validation:**
+
+- Passed `test_tool_history_projection`, `test_model_history_projection`, `test_session_event_persistence`, `test_session_restore`, `test_session_history`, `test_chat_agent_integration`, `test_agent_streaming`, `test_agent_loop`, `test_tool_runtime`, `test_tool_contract`, `test_tool_concurrency`, `test_sqlite_persistence`, `test_paper_agent`, `test_agent_runtime_ui`, and `test_session_delete`.
+- Passed `git diff --check`.
+- No real provider request, network call, `.env` change, commit, or push was performed.
 
 ---

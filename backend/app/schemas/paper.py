@@ -10,6 +10,7 @@ class PaperUploadResponse(BaseModel):
     filename: str
     file_path: str
     paper_language: str = "zh"
+    reused: bool = False
 
 
 class PaperAnalyzeResponse(BaseModel):

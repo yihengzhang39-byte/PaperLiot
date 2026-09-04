@@ -21,6 +21,9 @@ def _load_chat_route():
         def post(self, *_args, **_kwargs):
             return lambda function: function
 
+        get = post
+        delete = post
+
     fastapi.APIRouter = APIRouter
     fastapi.HTTPException = HTTPException
     fastapi.UploadFile = object
@@ -119,17 +122,24 @@ def main() -> None:
     from app.agents.agent_loop import AgentMaxStepsError
     from app.services import session_service
     from app.services.llm_service import AgentLLMResponse, AgentToolCall
+    from app.services.session_event_service import SessionEventService
+    from app.services.session_model_history_service import project_session_events_to_messages
     from app.tools import paper_tools
 
     original_config = chat.get_llm_config
     original_runner = chat.run_paper_agent
     original_memory_loader = chat._load_memory_context
+    original_event_service = chat.SessionEventService
+    original_history_projector = chat.project_session_events_to_messages
     original_session_dir = session_service.CHAT_SESSIONS_DIR
     session_directory = tempfile.TemporaryDirectory()
     chat.get_llm_config = lambda: SimpleNamespace(provider="deepseek")
     memory_context = _load_test_memory(chat)
     chat._load_memory_context = lambda: memory_context
     session_service.CHAT_SESSIONS_DIR = Path(session_directory.name)
+    database_path = Path(session_directory.name) / "paperpilot.db"
+    chat.SessionEventService = lambda session_id: SessionEventService(session_id, database_path=database_path)
+    chat.project_session_events_to_messages = lambda session_id, *, before_turn_id: project_session_events_to_messages(session_id, before_turn_id=before_turn_id, database_path=database_path)
     try:
         chat.SESSION_HISTORY.clear()
         records = []
@@ -167,11 +177,19 @@ def main() -> None:
         ]
         assert all(item["role"] != "tool" for item in chat.SESSION_HISTORY["history-s1"].messages)
         history_messages = records[1]["llm_calls"][0][0]
-        assert [item["role"] for item in history_messages] == ["system", "user", "assistant", "user"]
+        assert [item["role"] for item in history_messages] == ["system", "user", "assistant", "tool", "assistant", "user"]
+        assert history_messages[1]["content"] == "这篇论文标题是什么？"
+        assert history_messages[2]["tool_calls"][0]["id"] == history_messages[3]["tool_call_id"] == "info"
         assert sum(item["content"] == "它有哪些主要章节？" for item in history_messages) == 1
         assert all(text in history_messages[0]["content"] for text in ("Soul test", "User test", "Memory test"))
         assert any(
-            event.get("event") == "tool_succeeded" for event in records[1]["result"].context.metadata["agent_trace"]
+            event.get("event") == "tool_failed" and event.get("tool_name") == "extract_sections"
+            for event in records[1]["result"].context.metadata["agent_trace"]
+        )
+        assert any(
+            "Missing required state: parsed_pdf" in str(item.get("content"))
+            for item in records[1]["result"].context.messages
+            if item.get("role") == "tool"
         )
 
         chat.SESSION_HISTORY.clear()
@@ -199,6 +217,8 @@ def main() -> None:
         chat.get_llm_config = original_config
         chat.run_paper_agent = original_runner
         chat._load_memory_context = original_memory_loader
+        chat.SessionEventService = original_event_service
+        chat.project_session_events_to_messages = original_history_projector
         session_service.CHAT_SESSIONS_DIR = original_session_dir
         session_directory.cleanup()
 

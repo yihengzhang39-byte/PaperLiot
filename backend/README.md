@@ -76,6 +76,7 @@ SECTION_REPAIR_MAX_ROUNDS=1
 PLAN_AGENT_LLM_ENABLED=false
 PLAN_AGENT_MAX_INPUT_CHARS=3000
 PLAN_AGENT_CONFIDENCE_THRESHOLD=0.7
+TOOL_MAX_PARALLEL_CALLS=10
 ```
 
 环境变量说明：
@@ -99,6 +100,7 @@ PLAN_AGENT_CONFIDENCE_THRESHOLD=0.7
 - `PLAN_AGENT_LLM_ENABLED`：是否启用受控 LLM planner，默认 `false`
 - `PLAN_AGENT_MAX_INPUT_CHARS`：`plan_agent_node` 发送给 LLM 的 `raw_text_preview` 最大长度，默认 `3000`
 - `PLAN_AGENT_CONFIDENCE_THRESHOLD`：LLM plan 被采纳的最低置信度，默认 `0.7`
+- `TOOL_MAX_PARALLEL_CALLS`：同一 Agent Step 内安全 Tool 调用的最大并发数，默认 `10`；设为 `1` 时全部串行
 
 ## PDF Parser 架构
 

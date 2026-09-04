@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 from app.agents.agent_loop import AgentMaxStepsError
-from app.agents.paper_agent import run_paper_agent
+from app.agents.paper_agent import PAPER_AGENT_SYSTEM_PROMPT, run_paper_agent
 from app.services.llm_service import AgentLLMResponse, AgentToolCall
 from app.tools import paper_tools
 
@@ -65,6 +65,51 @@ def main() -> None:
         direct = run_paper_agent("你能做什么？", llm_call=direct_llm)
         assert direct.final_answer == "我可以帮你阅读论文。" and len(direct_calls) == 1
         _assert_paper_schemas(direct_calls[0][1])
+        descriptions = {
+            tool["function"]["name"]: tool["function"]["description"] for tool in direct_calls[0][1]
+        }
+        assert "without parsing a PDF" in descriptions["get_paper_info"]
+        assert "may create or update parser cache" in descriptions["parse_pdf_with_grobid"]
+
+        for question in ("这篇论文分析过吗？", "这篇论文之前解析过吗？"):
+            state_llm, state_calls = _sequence_llm(
+                [
+                    AgentLLMResponse("", [AgentToolCall("info", "get_paper_info", '{"paper_id":"paper_1"}')]),
+                    AgentLLMResponse("当前 paper_id 没有已有解析缓存。", []),
+                ]
+            )
+            state_result = run_paper_agent(question, paper_id="paper_1", llm_call=state_llm)
+            assert state_result.final_answer == "当前 paper_id 没有已有解析缓存。" and len(state_calls) == 2
+            assert [event["name"] for event in state_result.events if event["type"] == "tool_call"] == ["get_paper_info"]
+
+        analyze_llm, analyze_calls = _sequence_llm(
+            [
+                AgentLLMResponse("", [AgentToolCall("grobid", "parse_pdf_with_grobid", '{"paper_id":"paper_1"}')]),
+                AgentLLMResponse("已开始基于论文内容分析方法。", []),
+            ]
+        )
+        analyzed = run_paper_agent("帮我分析这篇新论文的方法", paper_id="paper_1", llm_call=analyze_llm)
+        assert analyzed.final_answer == "已开始基于论文内容分析方法。" and len(analyze_calls) == 2
+        assert [event["name"] for event in analyzed.events if event["type"] == "tool_call"] == ["parse_pdf_with_grobid"]
+        assert "do not call a state-mutating\nTool to discover that state" in PAPER_AGENT_SYSTEM_PROMPT
+        assert "Research memory records durable research\nnotes" in PAPER_AGENT_SYSTEM_PROMPT
+        assert "current paper Tool Result as evidence" in PAPER_AGENT_SYSTEM_PROMPT
+
+        memory_llm, memory_calls = _sequence_llm(
+            [
+                AgentLLMResponse("", [AgentToolCall("info", "get_paper_info", '{"paper_id":"paper_1"}')]),
+                AgentLLMResponse("当前 paper_id 没有解析缓存；历史研究记忆中有相关论文记录。", []),
+            ]
+        )
+        memory_result = run_paper_agent(
+            "当前这篇论文之前分析过吗？",
+            paper_id="paper_1",
+            system_context="Research memory: paper_1 was discussed previously.",
+            llm_call=memory_llm,
+        )
+        assert memory_result.final_answer == "当前 paper_id 没有解析缓存；历史研究记忆中有相关论文记录。"
+        assert "Research memory: paper_1" in str(memory_calls[0][0][0]["content"])
+        assert [event["name"] for event in memory_result.events if event["type"] == "tool_call"] == ["get_paper_info"]
 
         parser_llm, parser_calls = _sequence_llm(
             [

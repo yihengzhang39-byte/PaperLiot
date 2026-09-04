@@ -21,15 +21,33 @@ fields can still be useful; inspect missing_fields and decide whether another To
 is needed. Parser Tools never fall back automatically. Cached-paper Tools only read
 results that a parser Tool has already produced. If a Tool result is insufficient,
 you may use another available Tool; if it is sufficient, answer directly. If a Tool
-fails, decide whether to retry, use another Tool, or explain the limitation. Do not
-claim any web lookup unless an actual web Tool was called. Only call the provided
+fails, decide whether to retry, use another Tool, or explain the limitation.
+When the user asks about an existing or previous state, do not call a state-mutating
+Tool to discover that state. First use a read-only state-observing Tool. This includes
+asking whether something already exists, was previously parsed, is cached, was
+processed, or was analyzed before. Only call a parser after observing current state
+and determining that the user's actual task requires parsing; a missing cache alone
+does not make parsing necessary. get_paper_info reports current parser-cache evidence,
+not completion of a full paper analysis. Research memory records durable research
+notes and cannot establish the parser/cache state of the current paper_id. If memory
+mentions a related paper, distinguish that historical record from current paper_id
+state and use the current paper Tool Result as evidence for the latter.
+When one Tool result determines whether another Tool should be called, do not call
+both Tools in the same assistant response. Call the information-gathering or
+state-checking Tool first, observe its Tool Result, and only in the next Agent Step
+decide whether the subsequent Tool is necessary. Multiple Tools may be proposed in
+the same Step only when they are independent and neither result affects whether the
+other Tool should run. Do not claim any web lookup unless an actual web Tool was called. Only call the provided
 tools. Only use save_research_memory when the user explicitly asks to remember a
 stable research fact or a durable cross-paper finding; never save ordinary chat.
 Use save_user_profile only when the user explicitly states or corrects durable personal
 profile information, such as university, education, identity, research interests,
 technical background, or preferences. List fields replace the whole stored list, so
 provide the user's complete desired list when correcting one. Never put that
-information in research memory."""
+information in research memory. Current session history is distinct from long-term memory
+and cross-session history. When it contains clear evidence for words such as previously,
+earlier, just now, or before, answer from current session history first; do not deny that
+evidence because it was not saved as long-term memory."""
 
 
 PAPER_AGENT_TOOL_SPECS = [*PAPER_TOOL_SPECS, *MEMORY_TOOL_SPECS, *MULTI_PAPER_TOOL_SPECS]
@@ -44,15 +62,21 @@ def build_paper_tool_registry() -> ToolRegistry:
     return registry
 
 
-def _semantic_history(history: list[dict[str, Any]] | None) -> list[dict[str, str]]:
-    """Keep only prior user/final-assistant messages in an Agent run."""
-    return [
-        {"role": item["role"], "content": item["content"]}
-        for item in history or []
-        if isinstance(item, dict)
-        and item.get("role") in {"user", "assistant"}
-        and isinstance(item.get("content"), str)
-    ]
+def _semantic_history(history: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Keep provider-compatible prior semantic and Tool-fact messages."""
+    messages: list[dict[str, Any]] = []
+    for item in history or []:
+        if not isinstance(item, dict) or not isinstance(item.get("content"), str):
+            continue
+        role = item.get("role")
+        if role in {"user", "assistant"}:
+            message: dict[str, Any] = {"role": role, "content": item["content"]}
+            if role == "assistant" and isinstance(item.get("tool_calls"), list):
+                message["tool_calls"] = item["tool_calls"]
+            messages.append(message)
+        elif role == "tool" and isinstance(item.get("tool_call_id"), str) and isinstance(item.get("name"), str):
+            messages.append({"role": "tool", "tool_call_id": item["tool_call_id"], "name": item["name"], "content": item["content"]})
+    return messages
 
 
 def build_paper_agent_messages(
@@ -62,7 +86,7 @@ def build_paper_agent_messages(
     history: list[dict[str, Any]] | None = None,
     system_context: str | None = None,
     active_paper_ids: list[str] | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Build one system prompt, prior semantic history, and the current user turn."""
     paper_context = (
         f"Current paper_id: {paper_id}."

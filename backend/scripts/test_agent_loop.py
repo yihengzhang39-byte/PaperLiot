@@ -25,10 +25,13 @@ def main() -> None:
     direct_llm, direct_calls = _sequence_llm([AgentLLMResponse("direct answer", [])])
     direct = run_agent(_context(), llm_call=direct_llm)
     assert direct.final_answer == "direct answer" and len(direct_calls) == 1
+    assert next(event for event in direct.events if event["type"] == "assistant_trace") == {
+        "type": "assistant_trace", "step": 1, "content": "direct answer"
+    }
 
     tool_llm, tool_calls = _sequence_llm(
         [
-            AgentLLMResponse("", [AgentToolCall("call_1", "echo", '{"text":"hello"}')]),
+            AgentLLMResponse("准备调用工具", [AgentToolCall("call_1", "echo", '{"text":"hello"}')]),
             AgentLLMResponse("tool returned hello", []),
         ]
     )
@@ -36,8 +39,11 @@ def main() -> None:
     assert tool_result.final_answer == "tool returned hello" and len(tool_calls) == 2
     assert tool_result.events[0] == {"type": "user_message", "content": "hello"}
     assert next(event for event in tool_result.events if event["type"] == "llm_message") == {
-        "type": "llm_message", "step": 1, "content": ""
+        "type": "llm_message", "step": 1, "content": "准备调用工具"
     }
+    assert [event["type"] for event in tool_result.events].index("assistant_trace") < [
+        event["type"] for event in tool_result.events
+    ].index("tool_call")
     assistant_call = next(message for message in tool_result.context.messages if message["role"] == "assistant" and message["tool_calls"])
     tool_message = next(message for message in tool_result.context.messages if message["role"] == "tool")
     assert assistant_call["tool_calls"][0]["id"] == tool_message["tool_call_id"] == "call_1"
@@ -47,6 +53,7 @@ def main() -> None:
     )
     unknown = run_agent(_context(), llm_call=unknown_llm)
     assert 'Unknown tool: missing' in next(message["content"] for message in unknown.context.messages if message["role"] == "tool")
+    assert not any(event["type"] == "assistant_trace" and event["step"] == 1 for event in unknown.events)
 
     invalid_llm, _ = _sequence_llm(
         [AgentLLMResponse("", [AgentToolCall("call_3", "echo", "not-json")]), AgentLLMResponse("recovered", [])]

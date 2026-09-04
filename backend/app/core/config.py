@@ -19,6 +19,8 @@ PAPER_METADATA_DIR = STORAGE_DIR / "paper_metadata"
 PAPER_CHUNKS_DIR = STORAGE_DIR / "paper_chunks"
 PAPER_PARSE_CACHE_DIR = STORAGE_DIR / "paper_parse_cache"
 CHAT_SESSIONS_DIR = STORAGE_DIR / "chat_sessions"
+PAPER_INDEX_PATH = STORAGE_DIR / "paper_index.json"
+DATABASE_PATH = STORAGE_DIR / "paperpilot.db"
 
 if load_dotenv is not None:
     load_dotenv(BASE_DIR / ".env")
@@ -86,6 +88,13 @@ class SessionConfig:
     """Bounded local-chat history settings."""
 
     max_history_messages: int = 20
+
+
+@dataclass(frozen=True)
+class ToolRuntimeConfig:
+    """Bounded concurrency for safe Tool calls in one Agent Step."""
+
+    max_parallel_tool_calls: int = 10
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -196,6 +205,11 @@ def get_session_config() -> SessionConfig:
     return SessionConfig(max_history_messages=max(_get_int_env("CHAT_HISTORY_MAX_MESSAGES", 20), 1))
 
 
+def get_tool_runtime_config() -> ToolRuntimeConfig:
+    """Read the Tool scheduler's safe-call concurrency limit."""
+    return ToolRuntimeConfig(max_parallel_tool_calls=max(_get_int_env("TOOL_MAX_PARALLEL_CALLS", 10), 1))
+
+
 LLM_PROVIDER = get_llm_config().provider
 LLM_API_KEY = get_llm_config().api_key
 LLM_BASE_URL = get_llm_config().base_url
@@ -222,6 +236,7 @@ RAG_CHUNK_SIZE = get_rag_config().chunk_size
 RAG_CHUNK_OVERLAP = get_rag_config().chunk_overlap
 RAG_TOP_K = get_rag_config().top_k
 CHAT_HISTORY_MAX_MESSAGES = get_session_config().max_history_messages
+TOOL_MAX_PARALLEL_CALLS = get_tool_runtime_config().max_parallel_tool_calls
 
 
 """

@@ -1,8 +1,10 @@
 """Agent-facing PDF parser and cached-paper Tools."""
 
 import re
+import json
 from typing import Any
 
+from app.runtime.tool_executor import ToolExecutionResult
 from app.agents.nodes.section_extract_node import (
     SECTION_KEYS,
     extract_sections_by_rules_with_meta,
@@ -339,12 +341,41 @@ def retrieve_paper_context(
     }
 
 
+def _history_payload(result: ToolExecutionResult) -> dict[str, Any]:
+    try:
+        value = json.loads(result.content)
+    except (TypeError, json.JSONDecodeError):
+        value = {}
+    return value if isinstance(value, dict) else {}
+
+
+def _paper_history_failure(result: ToolExecutionResult, payload: dict[str, Any]) -> dict[str, Any]:
+    return {"tool": result.tool_name, "status": "error", "summary": str(payload.get("error") or payload.get("warning") or result.error or "Tool execution failed.")[:300]}
+
+
+def project_paper_history(_args: dict[str, Any], result: ToolExecutionResult) -> dict[str, Any]:
+    payload = _history_payload(result)
+    if not result.ok or payload.get("success") is False:
+        return _paper_history_failure(result, payload)
+    name = result.tool_name
+    if name.startswith("parse_pdf_with_"):
+        return {"tool": name, "status": "success", "paper_id": payload.get("paper_id", ""), "parser": payload.get("parser", ""), "cache_created": payload.get("cached") is False}
+    if name == "get_paper_info":
+        return {"tool": name, "status": "success", "paper_id": payload.get("paper_id", ""), "title": payload.get("title", "")[:300], "parsed": True, "parser": payload.get("parser", ""), "cache_status": "cached" if payload.get("cached_parsers") else "missing"}
+    if name == "extract_sections":
+        section_lengths = payload.get("section_lengths")
+        return {"tool": name, "status": "success", "paper_id": payload.get("paper_id", ""), "parser": payload.get("parser", ""), "sections": list(section_lengths)[:20] if isinstance(section_lengths, dict) else [], "section_count": len(section_lengths) if isinstance(section_lengths, dict) else 0}
+    chunks = payload.get("chunks") if isinstance(payload.get("chunks"), list) else []
+    sections = list(dict.fromkeys(str(chunk.get("section")) for chunk in chunks if isinstance(chunk, dict) and chunk.get("section")))[:20]
+    return {"tool": name, "status": "success", "paper_id": payload.get("paper_id", ""), "query": str(payload.get("query", ""))[:300], "chunk_count": len(chunks), "sections": sections}
+
+
 PAPER_TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
             "name": "parse_pdf_with_grobid",
-            "description": "Parse an uploaded academic PDF with GROBID for title, authors, abstract, section hierarchy, and references. Missing title or authors does not mean failure; inspect missing_fields and call parse_pdf_with_pymupdf if needed.",
+            "description": "Run a new GROBID parse of an uploaded academic PDF for title, authors, abstract, section hierarchy, and references; this may create or update parser cache. Missing title or authors does not mean failure; inspect missing_fields and call parse_pdf_with_pymupdf if needed. Do not use this Tool merely to determine whether the paper was previously parsed, cached, processed, or analyzed; inspect existing paper/cache state first.",
             "parameters": {
                 "type": "object",
                 "properties": {"paper_id": {"type": "string"}},
@@ -356,7 +387,7 @@ PAPER_TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "parse_pdf_with_pymupdf",
-            "description": "Read selected raw PDF pages with PyMuPDF. Use it for first-page metadata, page-specific questions, unusual layouts, or to supplement an incomplete GROBID result. Omit pages to read page 1.",
+            "description": "Run a new PyMuPDF parse and read selected raw PDF pages; this may create or update parser cache. Use it for first-page metadata, page-specific questions, unusual layouts, or to supplement an incomplete GROBID result. Omit pages to read page 1. Do not use this Tool merely to determine whether the paper was previously parsed, cached, processed, or analyzed; inspect existing paper/cache state first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -371,7 +402,7 @@ PAPER_TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_paper_info",
-            "description": "Read metadata from cached parser results only. If no result is cached, call a parser Tool instead of assuming paper contents.",
+            "description": "Read existing cached parser metadata for paper_id without parsing a PDF or creating/updating parser cache. Use this Tool first when the user asks whether the current paper was previously parsed, cached, processed, or has existing paper information. If no cached parser result exists, report that current cache state; do not parse merely to answer that state question. This Tool reports parser-cache evidence, not whether a full paper analysis was completed.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -419,8 +450,40 @@ PAPER_TOOL_SPECS: list[dict[str, Any]] = [
 
 def register_paper_tools(registry: ToolRegistry) -> None:
     """Register the Agent-selectable parser and cached-paper Tools."""
-    registry.register("parse_pdf_with_grobid", parse_pdf_with_grobid)
-    registry.register("parse_pdf_with_pymupdf", parse_pdf_with_pymupdf)
-    registry.register("get_paper_info", get_paper_info)
-    registry.register("extract_sections", extract_sections)
-    registry.register("retrieve_paper_context", retrieve_paper_context)
+    registry.register(
+        "parse_pdf_with_grobid",
+        parse_pdf_with_grobid,
+        requires=("paper_id",),
+        produces=("parsed_pdf", "paper_metadata", "sections"),
+        project_history_result=project_paper_history,
+    )
+    registry.register(
+        "parse_pdf_with_pymupdf",
+        parse_pdf_with_pymupdf,
+        requires=("paper_id",),
+        produces=("parsed_pdf", "paper_metadata", "sections"),
+        project_history_result=project_paper_history,
+    )
+    registry.register(
+        "get_paper_info",
+        get_paper_info,
+        requires=("paper_id",),
+        produces=("parsed_pdf", "paper_metadata", "cache_status"),
+        is_concurrency_safe=lambda _args: True,
+        project_history_result=project_paper_history,
+    )
+    registry.register(
+        "extract_sections",
+        extract_sections,
+        requires=("paper_id", "parsed_pdf"),
+        produces=("sections",),
+        is_concurrency_safe=lambda _args: True,
+        project_history_result=project_paper_history,
+    )
+    registry.register(
+        "retrieve_paper_context",
+        retrieve_paper_context,
+        requires=("paper_id", "parsed_pdf"),
+        produces=("retrieved_paper_context",),
+        project_history_result=project_paper_history,
+    )

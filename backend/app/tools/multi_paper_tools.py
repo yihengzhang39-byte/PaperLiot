@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from app.runtime.tool_executor import ToolExecutionResult
 from app.runtime.tool_registry import ToolRegistry
 from app.tools.paper_tools import retrieve_paper_context
 
@@ -39,6 +40,18 @@ def get_multi_paper_context(
     return {"query": query.strip(), "papers": papers}
 
 
+def project_multi_paper_history(_args: dict[str, Any], result: ToolExecutionResult) -> dict[str, Any]:
+    import json
+    try:
+        payload = json.loads(result.content)
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    if not result.ok or not isinstance(payload, dict):
+        return {"tool": "get_multi_paper_context", "status": "error", "summary": (result.error or "Tool execution failed.")[:300]}
+    papers = payload.get("papers") if isinstance(payload.get("papers"), list) else []
+    return {"tool": "get_multi_paper_context", "status": "success", "query": str(payload.get("query", ""))[:300], "paper_ids": [item.get("paper_id") for item in papers if isinstance(item, dict) and isinstance(item.get("paper_id"), str)][:20], "result_count": len(papers)}
+
+
 MULTI_PAPER_TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -61,4 +74,4 @@ MULTI_PAPER_TOOL_SPECS: list[dict[str, Any]] = [
 
 def register_multi_paper_tools(registry: ToolRegistry) -> None:
     """Register multi-paper retrieval without adding Runtime special cases."""
-    registry.register("get_multi_paper_context", get_multi_paper_context)
+    registry.register("get_multi_paper_context", get_multi_paper_context, produces=("multi_paper_context",), project_history_result=project_multi_paper_history)

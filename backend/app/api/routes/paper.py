@@ -29,7 +29,7 @@ router = APIRouter()
 def upload_paper(
     file: UploadFile = File(...),
     paper_language: str = Form("zh"),
-) -> dict[str, str]:
+) -> dict[str, object]:
     """Upload a PDF file and save it locally."""
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
