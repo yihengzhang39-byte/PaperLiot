@@ -1,8 +1,16 @@
 # PaperPilot
 
-PaperPilot 是一个科研论文阅读 Agent 后端框架。当前阶段聚焦“单篇论文精读”闭环：
+PaperPilot 是一个本地优先的科研论文阅读 Agent，提供浏览器界面、FastAPI API 和 CLI。
 
-PDF 输入 -> PDF 文本解析 -> 基本信息抽取 -> 章节内容抽取 -> 方法分析 -> 实验分析 -> 中文 Markdown 精读笔记。
+当前支持：
+
+- PDF 上传、去重、删除与本地 SQLite 持久化
+- PyMuPDF / GROBID 解析，以及可选的 Docling / Marker / MinerU adapter
+- 论文信息、章节、方法和实验分析，生成中文 Markdown 精读笔记
+- 基于工具调用的单篇/多篇论文对话，支持 SSE 流式输出
+- 本地检索、版本化证据回读、会话恢复、上下文压缩和 Harness 调试轨迹
+
+默认 `mock` 模式不访问真实 LLM；设置 DeepSeek 或 OpenAI-compatible 配置后才会发起外部模型请求。
 
 ## 目录结构
 
@@ -10,11 +18,17 @@ PDF 输入 -> PDF 文本解析 -> 基本信息抽取 -> 章节内容抽取 -> �
 backend/
   app/
     main.py
-    api/routes/paper.py
+    api/routes/
+      paper.py
+      chat.py
     agents/
+      agent_loop.py
+      paper_agent.py
       paper_state.py
       paper_graph.py
       nodes/
+    repositories/
+    runtime/
     services/
       parsers/
       pdf_service.py
@@ -23,14 +37,25 @@ backend/
       file_service.py
     tools/
       paper_lookup_tools.py
+      paper_tools.py
+      multi_paper_tools.py
+      memory_tools.py
+      session_history_tools.py
     schemas/
     core/
       config.py
+  memory/
+  static/
   storage/
     papers/
     notes/
+    paper_parse_cache/
+    paper_section_json/
+    chat_sessions/
+    paperpilot.db
   scripts/
     run_analyze_paper.py
+    run_context_acceptance.py
   requirements.txt
   .env.example
   README.md
@@ -38,19 +63,17 @@ backend/
 
 ## 安装依赖
 
+Python 要求：`>=3.10`。
+
 ```bash
 cd backend
 python -m venv .venv
-.venv\Scripts\activate
-source .venv/bin/activate # linux环境下
-pip install -r requirements.txt
+source .venv/bin/activate          # Linux / macOS
+# .venv\Scripts\Activate.ps1       # Windows PowerShell
+python -m pip install -r requirements.txt
 ```
 
-如果你使用项目根目录已有虚拟环境，也可以在根目录执行：
-
-```bash
-uv pip install -r backend\requirements.txt --python .venv\Scripts\python.exe
-```
+`requirements.txt` 锁定的是当前已验证的直接依赖版本。Docling、Marker、MinerU 和 `tiktoken` 均为可选能力，不在默认安装中。
 
 ## 配置 .env
 
@@ -366,17 +389,28 @@ LLM_TEMPERATURE=0.2
 
 ## 用 Swagger 测试
 
-启动服务后打开：
+启动服务后，浏览器首页为 `http://127.0.0.1:8000/`，Swagger 为：
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-调用顺序：
+精读调用顺序：
 
 1. `POST /api/papers/upload` 上传 PDF，得到 `paper_id`，可传 multipart 字段 `paper_language=zh|en`
 2. `POST /api/papers/{paper_id}/analyze` 生成精读笔记，可传 query 参数 `paper_language=zh|en`
 3. `GET /api/papers/{paper_id}/note` 读取 Markdown 笔记
+4. `DELETE /api/papers/{paper_id}` 删除论文及其本地产物
+
+对话与会话接口：
+
+- `POST /api/chat`：同步对话
+- `POST /api/chat/stream`：SSE 流式对话
+- `POST /api/chat/sessions`：创建可恢复会话
+- `GET /api/chat/sessions`：列出会话
+- `GET /api/chat/sessions/{session_id}`：恢复会话
+- `DELETE /api/chat/sessions/{session_id}`：删除会话
+- `GET /api/chat/sessions/{session_id}/turns/{turn_id}/trace`：读取单轮调试轨迹
 
 健康检查：
 
@@ -676,15 +710,14 @@ D:\Agent-paper\backend\storage\paper_section_json\sam2.json
 
 ## 当前限制
 
-- 只支持单篇论文精读
-- 章节抽取已支持规则切分 + LLM 校正，但复杂 PDF 版式下仍可能不稳定
-- 长论文目前是简单截断，还没有 chunk / RAG
-- 还没有 MySQL、任务状态、异步队列和前端
+- Docling / Marker / MinerU 只有 adapter，需要用户自行安装并接入对应运行时
+- GROBID 需要独立服务；解析失败时不会在服务层自动 fallback
+- 章节抽取对复杂排版、扫描件和异常文本流仍可能不稳定
+- 会话占用锁是进程内实现，当前部署应使用单 API worker
+- 本地检索是词法检索，暂无 embedding / 向量数据库
 
 ## 后续扩展计划
 
-- 接入更完整的真实 LLM Provider 管理
-- 加入 MySQL 保存论文、任务和笔记元数据
-- 加入多论文对比 Agent
-- 加入 Related Work 生成
-- 加入 Vue 前端
+- 接入 OCR 与更完整的可选 parser 运行时
+- 在实测词法检索不足时再引入 embedding 检索
+- 需要多 worker 部署时，将会话占用锁迁移到共享存储

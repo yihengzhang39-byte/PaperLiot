@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 from statistics import median
 
-import fitz
+import pymupdf as fitz
 
 from app.services.parsers.base import BasePDFParser
 from app.services.parsers.schema import ParsedPaper
