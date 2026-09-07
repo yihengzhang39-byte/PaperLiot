@@ -1,2 +1,4 @@
 .env
 docs/
+backend/memory/memory.md
+backend/memory/user.md
