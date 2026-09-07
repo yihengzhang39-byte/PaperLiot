@@ -1,6 +1,10 @@
 """Paper-domain configuration for the generic Agent Loop."""
 
 from typing import Any
+from pathlib import Path
+
+from app.services.session_model_history_service import load_model_history
+from app.tools.session_history_tools import SESSION_HISTORY_TOOL_SPEC, register_session_history_tool
 
 from app.agents.agent_context import AgentContext
 from app.agents.agent_loop import AgentEventSink, AgentLoopResult, LLMCaller, LLMStreamCaller, run_agent
@@ -54,10 +58,10 @@ evidence because it was not saved as long-term memory."""
 PAPER_AGENT_TOOL_SPECS = [*PAPER_TOOL_SPECS, *MEMORY_TOOL_SPECS, *MULTI_PAPER_TOOL_SPECS]
 
 
-def build_paper_tool_registry() -> ToolRegistry:
+def build_paper_tool_registry(*, allowed_paper_ids: list[str] | None = None) -> ToolRegistry:
     """Create a registry containing only the currently supported Paper Tools."""
     registry = ToolRegistry()
-    register_paper_tools(registry)
+    register_paper_tools(registry, allowed_paper_ids=allowed_paper_ids)
     register_memory_tools(registry)
     register_multi_paper_tools(registry)
     return registry
@@ -140,14 +144,25 @@ def run_paper_agent(
     llm_stream: LLMStreamCaller | None = None,
     event_sink: AgentEventSink | None = None,
     debug_trace: DebugTraceService | None = None,
+    turn_id: str | None = None,
+    database_path: Path | None = None,
+    summary_call=None,
 ) -> AgentLoopResult:
     """Run the generic loop with PaperPilot's prompt, tools, and schemas."""
     message = message.strip()
     if not message:
         raise ValueError("message cannot be empty")
     paper_id = paper_id.strip() if paper_id else None
-    registry = build_paper_tool_registry()
+    registry = build_paper_tool_registry(allowed_paper_ids=list(dict.fromkeys([*([paper_id] if paper_id else []), *(active_paper_ids or [])])))
+    snapshot = load_model_history(session_id, before_turn_id=turn_id, database_path=database_path) if session_id and turn_id else None
+    specs = list(PAPER_AGENT_TOOL_SPECS)
+    if snapshot is not None:
+        history = snapshot.messages
+        register_session_history_tool(registry, session_id, turn_id, database_path=database_path)
+        specs.append(SESSION_HISTORY_TOOL_SPEC)
     _, history_origins = _semantic_history_with_origins(history)
+    if snapshot is not None:
+        history_origins = snapshot.origins
     message_origins = [
         {"origin": "system_prompt", "metadata": {"sources": _system_sources(system_context)}},
         *history_origins,
@@ -164,6 +179,7 @@ def run_paper_agent(
             active_paper_ids=active_paper_ids,
         ),
         max_steps=max_steps,
+        turn_id=turn_id, database_path=database_path, history=snapshot, history_end=1 + len(history_origins),
         metadata={
             "paper_agent": {
                 "paper_id": paper_id,
@@ -176,7 +192,8 @@ def run_paper_agent(
     return run_agent(
         context,
         tool_registry=registry,
-        tool_specs=PAPER_AGENT_TOOL_SPECS,
+        tool_specs=specs,
+        summary_call=summary_call,
         llm_call=llm_call,
         llm_stream=llm_stream,
         event_sink=event_sink,

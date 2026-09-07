@@ -8,6 +8,8 @@ from typing import Any
 from app.agents.agent_context import AgentContext
 from app.runtime.tool_registry import ToolRegistry
 from app.services.llm_service import AgentToolCall
+from app.services.tool_result_service import model_evidence_refs, project_tool_result
+from app.services.retrieval_service import ToolInputError
 
 
 RuntimeEventSink = Callable[[dict[str, Any]], None]
@@ -24,6 +26,7 @@ class ToolExecutionResult:
     error: str | None = None
     history_result: dict[str, Any] | None = None
     history_projector: str | None = None
+    model_content: str | None = None
 
 
 def parse_arguments(arguments: str | dict[str, Any]) -> dict[str, Any]:
@@ -72,11 +75,13 @@ def trace_tool_event(
 
 
 def _error_result(tool_call: AgentToolCall, error: str) -> ToolExecutionResult:
+    content = json.dumps({"ok": False, "success": False, "error": error}, ensure_ascii=False)
     return ToolExecutionResult(
         tool_call_id=tool_call.id,
         tool_name=tool_call.name,
         ok=False,
-        content=json.dumps({"ok": False, "error": error}, ensure_ascii=False),
+        content=content,
+        model_content=project_tool_result(tool_call.name, content),
         error=error,
         history_result={"tool": tool_call.name, "status": "error", "summary": error[:300]},
     )
@@ -241,6 +246,11 @@ def execute_tool_call(
         failed = _error_result(tool_call, str(exc))
         _emit_result(event_sink, failed, step)
         return failed
+    except ToolInputError as exc:
+        trace_tool_event(trace, "tool_failed", tool_call, step)
+        failed = _error_result(tool_call, f"Invalid Tool input or evidence reference: {exc}")
+        _emit_result(event_sink, failed, step)
+        return failed
     except Exception as exc:
         trace_tool_event(trace, "tool_failed", tool_call, step)
         failed = _error_result(tool_call, f"Tool execution failed: {type(exc).__name__}")
@@ -254,9 +264,19 @@ def execute_tool_call(
         ok=True,
         content=_serialize_result(result),
     )
-    history_result, history_projector = _project_history_result(arguments, completed, registry)
-    completed = replace(completed, history_result=history_result, history_projector=history_projector)
     _update_produced_state(completed, registry, context)
+    try:
+        model_content = project_tool_result(tool_call.name, completed.content)
+    except Exception:
+        # Execution already succeeded: report projection failure separately and
+        # never send the unbounded raw payload or reverse produced-state facts.
+        model_content = json.dumps({"execution_status": _history_status(completed), "projection_error": "Tool result could not be represented within the output budget.", "omitted": True, "readback": None})
+    completed = replace(completed, model_content=model_content)
+    history_result, history_projector = _project_history_result(arguments, completed, registry)
+    refs = model_evidence_refs(model_content)
+    if refs:
+        history_result = {**history_result, "evidence_refs": refs, "readback_tool": "read_paper_chunk"}
+    completed = replace(completed, history_result=history_result, history_projector=history_projector)
     _emit_result(event_sink, completed, step)
     return completed
 

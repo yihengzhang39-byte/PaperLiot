@@ -38,6 +38,93 @@ class LLMConfig:
     temperature: float = 0.2
 
 
+class ContextConfigError(ValueError):
+    """Invalid or missing Agent model capacity (never inferred for real models)."""
+
+    code = "context_config_invalid"
+
+
+@dataclass(frozen=True)
+class CompactionConfig:
+    recent_ratio: float = 0.16
+    target_tokens: int = 1200
+    max_output_tokens: int = 4096
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.recent_ratio < 1:
+            raise ContextConfigError("COMPACTION_RECENT_RATIO must be in [0, 1).")
+        for name in ("target_tokens", "max_output_tokens"):
+            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
+                raise ContextConfigError(f"Compaction {name} must be a positive integer.")
+        if self.target_tokens >= self.max_output_tokens:
+            raise ContextConfigError("COMPACTION_TARGET_TOKENS must be below COMPACTION_MAX_OUTPUT_TOKENS.")
+
+
+def get_compaction_config() -> CompactionConfig:
+    try:
+        return CompactionConfig(_get_float_env("COMPACTION_RECENT_RATIO", 0.16), _get_int_env("COMPACTION_TARGET_TOKENS", 1200), _get_int_env("COMPACTION_MAX_OUTPUT_TOKENS", 4096))
+    except ValueError as exc:
+        raise ContextConfigError(f"Invalid compaction configuration: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class ContextConfig:
+    """Capacity of the configured Agent model; independent of LangGraph settings."""
+
+    window: int
+    max_output_tokens: int
+    safety_tokens: int = 1024
+    input_limit: int | None = None
+    output_limit: int | None = None
+    trigger_ratio: float = 0.8
+    target_ratio: float = 0.6
+    target_budget_ratio: float = 0.8
+    output_token_parameter: str = "max_tokens"
+
+    def __post_init__(self) -> None:
+        for name in ("window", "max_output_tokens", "safety_tokens", "input_limit", "output_limit"):
+            value = getattr(self, name)
+            if value is None and name in {"input_limit", "output_limit"}:
+                continue
+            if type(value) is not int or value <= 0:
+                raise ContextConfigError(f"Context {name} must be a positive integer.")
+        if self.window - self.max_output_tokens - self.safety_tokens <= 0:
+            raise ContextConfigError("Context input budget B = W - O - S must be positive.")
+        if self.output_limit is not None and self.max_output_tokens > self.output_limit:
+            raise ContextConfigError("Context max_output_tokens exceeds the model output_limit.")
+        if self.input_limit is not None and self.input_limit <= self.safety_tokens:
+            raise ContextConfigError("Context input_limit must exceed safety_tokens.")
+        if not (0 < self.target_ratio < self.trigger_ratio < 1 and 0 < self.target_budget_ratio < 1):
+            raise ContextConfigError("Context ratios must be in (0, 1), with target below trigger.")
+        if self.output_token_parameter not in {"max_tokens", "max_completion_tokens"}:
+            raise ContextConfigError("Unsupported context output_token_parameter.")
+
+
+def get_context_config(llm: LLMConfig) -> ContextConfig:
+    """Read Agent-only limits lazily, so graph callers retain their existing policy."""
+    if llm.provider not in {"mock", "deepseek", "openai_compatible"}:
+        raise ContextConfigError("Unsupported context LLM provider.")
+    if llm.provider != "mock" and not llm.model:
+        raise ContextConfigError("LLM_MODEL is required for context budgeting.")
+    try:
+        config = ContextConfig(
+            window=_get_int_env("AGENT_CONTEXT_WINDOW", 65536 if llm.provider == "mock" else 0),
+            max_output_tokens=_get_int_env("AGENT_MAX_OUTPUT_TOKENS", 4096 if llm.provider == "mock" else 0),
+            safety_tokens=_get_int_env("AGENT_CONTEXT_SAFETY_TOKENS", 1024),
+            input_limit=int(os.environ["AGENT_MODEL_INPUT_LIMIT"]) if os.getenv("AGENT_MODEL_INPUT_LIMIT", "").strip() else None,
+            output_limit=int(os.environ["AGENT_MODEL_OUTPUT_LIMIT"]) if os.getenv("AGENT_MODEL_OUTPUT_LIMIT", "").strip() else None,
+            trigger_ratio=_get_float_env("AGENT_CONTEXT_TRIGGER_RATIO", 0.8),
+            target_ratio=_get_float_env("AGENT_CONTEXT_TARGET_RATIO", 0.6),
+            target_budget_ratio=_get_float_env("AGENT_CONTEXT_TARGET_BUDGET_RATIO", 0.8),
+            output_token_parameter=os.getenv("AGENT_OUTPUT_TOKEN_PARAMETER", "max_tokens").strip(),
+        )
+    except (ValueError, TypeError) as exc:
+        raise ContextConfigError(f"Invalid Agent context configuration (AGENT_CONTEXT_WINDOW / AGENT_MAX_OUTPUT_TOKENS and related limits): {exc}") from exc
+    if llm.provider == "deepseek" and config.output_token_parameter != "max_tokens":
+        raise ContextConfigError("DeepSeek requires AGENT_OUTPUT_TOKEN_PARAMETER=max_tokens.")
+    return config
+
+
 @dataclass(frozen=True)
 class PDFParserConfig:
     """Runtime PDF parser configuration."""
@@ -95,6 +182,27 @@ class ToolRuntimeConfig:
     """Bounded concurrency for safe Tool calls in one Agent Step."""
 
     max_parallel_tool_calls: int = 10
+
+
+@dataclass(frozen=True)
+class ToolResultConfig:
+    """Serialized model-result ceiling, including all papers and metadata."""
+
+    max_chars: int = 12000
+    read_chars: int = 2000
+
+    def __post_init__(self) -> None:
+        if type(self.max_chars) is not int or not 4096 <= self.max_chars <= 64000:
+            raise ContextConfigError("TOOL_RESULT_MAX_CHARS must be between 4096 and 64000.")
+        if type(self.read_chars) is not int or not 1 <= self.read_chars <= min(4000, self.max_chars // 2):
+            raise ContextConfigError("TOOL_READ_MAX_CHARS must be positive and <= min(4000, result budget / 2).")
+
+
+def get_tool_result_config() -> ToolResultConfig:
+    try:
+        return ToolResultConfig(_get_int_env("TOOL_RESULT_MAX_CHARS", 12000), _get_int_env("TOOL_READ_MAX_CHARS", 2000))
+    except ValueError as exc:
+        raise ContextConfigError(f"Invalid tool result configuration: {exc}") from exc
 
 
 @dataclass(frozen=True)

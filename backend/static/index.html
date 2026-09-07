@@ -32,8 +32,13 @@
     .session-delete-button:hover .session-delete-tooltip, .session-delete-button:focus-visible .session-delete-tooltip { opacity: 1; transform: translate(0, -50%); }
     .trace-scrollbar::-webkit-scrollbar { width: 7px; height: 7px; }
     .trace-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+    #turnInspectorShell { width: 420px; min-width: 320px; max-width: min(70vw, 960px); }
+    #turnInspectorResizeHandle { position: absolute; inset: 0 auto 0 0; z-index: 20; width: 12px; cursor: col-resize; border: 0; background: transparent; padding: 0; }
+    #turnInspectorResizeHandle::after { position: absolute; inset: 0 auto 0 0; width: 2px; content: ""; background: #cbd5e1; transition: background-color .14s ease; }
+    #turnInspectorResizeHandle:hover::after, #turnInspectorResizeHandle:focus-visible::after { background: #60a5fa; }
+    body.inspector-resizing { cursor: col-resize; user-select: none; }
     @media (max-width: 767px) {
-      #turnInspector { position: fixed; inset: 0 0 0 auto; z-index: 50; width: min(94vw, 430px); box-shadow: -16px 0 40px rgba(15, 23, 42, .35); }
+      #turnInspectorShell { position: fixed; inset: 0 0 0 auto; z-index: 50; width: min(94vw, 430px); min-width: 0; max-width: 94vw; box-shadow: -16px 0 40px rgba(15, 23, 42, .35); }
     }
   </style>
 </head>
@@ -128,16 +133,19 @@
       </footer>
     </main>
 
-    <aside id="turnInspector" class="trace-scrollbar hidden h-full w-[420px] shrink-0 overflow-y-auto border-l border-slate-200 bg-white text-slate-900" aria-label="Harness Inspector">
-      <div class="sticky top-0 z-10 flex items-start justify-between border-b border-slate-200 bg-white px-4 py-4">
-        <div class="min-w-0">
-          <div class="text-sm font-semibold tracking-wide text-slate-900">Harness Inspector</div>
-          <div id="turnInspectorMeta" class="mt-1 truncate text-xs text-slate-500"></div>
+    <div id="turnInspectorShell" class="relative hidden h-full shrink-0">
+      <button id="turnInspectorResizeHandle" type="button" role="separator" aria-label="调整轨迹检查器宽度" aria-controls="turnInspector" aria-orientation="vertical" aria-valuemin="320" aria-valuenow="420"></button>
+      <aside id="turnInspector" class="trace-scrollbar h-full overflow-y-auto border-l border-slate-200 bg-white text-slate-900" aria-label="Harness Inspector">
+        <div class="sticky top-0 z-10 flex items-start justify-between border-b border-slate-200 bg-white px-4 py-4">
+          <div class="min-w-0">
+            <div class="text-sm font-semibold tracking-wide text-slate-900">Harness Inspector</div>
+            <div id="turnInspectorMeta" class="mt-1 truncate text-xs text-slate-500"></div>
+          </div>
+          <button id="closeTurnInspectorButton" type="button" aria-label="关闭轨迹检查器" class="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-900">×</button>
         </div>
-        <button id="closeTurnInspectorButton" type="button" aria-label="关闭轨迹检查器" class="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-900">×</button>
-      </div>
-      <div id="turnInspectorContent" class="space-y-3 p-4"></div>
-    </aside>
+        <div id="turnInspectorContent" class="space-y-3 p-4"></div>
+      </aside>
+    </div>
   </div>
 
   <script>
@@ -163,7 +171,9 @@
     const pendingAttachmentWrap = document.getElementById("pendingAttachmentWrap");
     const pendingAttachmentName = document.getElementById("pendingAttachmentName");
     const removePendingAttachmentButton = document.getElementById("removePendingAttachmentButton");
+    const turnInspectorShell = document.getElementById("turnInspectorShell");
     const turnInspector = document.getElementById("turnInspector");
+    const turnInspectorResizeHandle = document.getElementById("turnInspectorResizeHandle");
     const turnInspectorMeta = document.getElementById("turnInspectorMeta");
     const turnInspectorContent = document.getElementById("turnInspectorContent");
     const closeTurnInspectorButton = document.getElementById("closeTurnInspectorButton");
@@ -173,6 +183,7 @@
     let isGenerating = false;
     let inspectorSessionId = "";
     let inspectorTurnId = "";
+    let inspectorResizeStart = null;
     const CURRENT_SESSION_STORAGE_KEY = "paperpilot_current_session_id";
 
     marked.setOptions({
@@ -366,6 +377,9 @@
                 traceContent.className = "whitespace-pre-wrap text-slate-600";
                 traceContent.textContent = entry.content;
                 item.append(traceTitle, traceContent);
+              } else if (entry.type === "context") {
+                item.className = ["summary_failed", "stopped", "interrupted"].includes(entry.phase) ? "text-amber-700" : "text-blue-700";
+                item.textContent = entry.content;
               } else if (entry.type === "final") {
                 item.className = entry.status === "completed" ? "text-emerald-600" : "";
                 item.textContent = entry.status === "completed" ? "✓ 回答生成完成" : "⏳ 正在生成回答...";
@@ -483,6 +497,7 @@
     }
 
     function formatTraceSize(value) {
+      if (value === null || value === undefined) return "未知";
       const size = Number(value);
       if (!Number.isFinite(size)) {
         return "未知";
@@ -516,6 +531,9 @@
       (call.input?.messages || []).forEach((message) => input.body.appendChild(renderTraceMessage(message)));
       wrapper.appendChild(input.details);
       const output = traceDetails("LLM Output", false);
+      output.body.appendChild(traceElement("div", "text-[11px] text-slate-600", "正常 Agent 调用 · Provider usage（缺失不代表零）"));
+      output.body.appendChild(tracePre({ usage: call.output?.usage ?? call.error?.usage ?? null, finish_reason: call.output?.finish_reason ?? call.error?.finish_reason ?? null }));
+      if (call.error) output.body.appendChild(tracePre({ error: call.error }));
       const content = call.output?.content;
       if (content) {
         output.body.appendChild(tracePre(content));
@@ -542,6 +560,7 @@
       const section = traceDetails(`Tool Result · ${result.name || "unknown"}`, false);
       const statusTone = result.status === "success" ? "green" : "rose";
       section.body.append(traceLabel(result.status || "unknown", statusTone), traceElement("span", "ml-2 text-[11px] text-slate-500", `tool_call_id: ${result.tool_call_id || "—"}`));
+      section.body.appendChild(traceElement("div", "mt-2 text-[11px] text-slate-600", `工具原始结果 ${formatTraceSize(result.raw_result_size)} → 模型可见 ${formatTraceSize(result.model_result_size)}`));
       const current = result.current_run_result || {};
       const currentView = traceDetails(`Current Run Result · ${formatTraceSize(current.size_chars)}`, false);
       currentView.body.appendChild(traceElement("div", "text-[11px] text-slate-500", `Truncated in debug storage: ${current.truncated ? "Yes" : "No"}`));
@@ -563,6 +582,21 @@
       return section.details;
     }
 
+    function renderContextEvent(event) {
+      const labels = { "llm/context_budget": "本地输入估算 estimated（不是 Provider usage）", "context/compaction": "旧历史整理 · 摘要调用独立计量", "context/recovery": "Provider 超限恢复 · 本 turn 最多重试一次" };
+      const section = traceDetails(labels[event.type] || event.type, false);
+      const data = event.data || {};
+      if (event.type === "llm/context_budget") {
+        section.body.appendChild(traceElement("div", "text-xs text-slate-600", ["W", "I", "O", "S", "B", "T", "G"].map((key) => `${key}=${data[key] ?? "未知"}`).join(" · ")));
+      }
+      if (event.type === "context/compaction") {
+        section.body.appendChild(traceElement("div", "text-xs text-slate-600", `摘要调用次数 ${data.number ?? data.summary_calls ?? "未知"}/2 · 触发原因 ${data.trigger_reason ?? "—"} · 耗时 ${data.elapsed_ms ?? "—"} ms`));
+        section.body.appendChild(traceElement("div", "mt-1 text-xs text-slate-600", "usage 属于摘要调用，不计为普通 Agent 工具步骤。结构校验不保证摘要无损。"));
+      }
+      section.body.appendChild(tracePre(data));
+      return section.details;
+    }
+
     function renderTraceStep(step) {
       const section = traceDetails(`Step ${step.step}`, true);
       const counts = traceElement("div", "mb-3 flex flex-wrap gap-2 text-[11px] text-slate-500");
@@ -571,6 +605,7 @@
       const timeline = traceDetails(`Timeline · ${step.timeline?.length || 0} events`, false);
       (step.timeline || []).forEach((event) => timeline.body.appendChild(traceElement("div", "border-l border-slate-300 py-1 pl-2 text-[11px] text-slate-500", `#${event.trace_seq} · ${event.type}`)));
       section.body.appendChild(timeline.details);
+      (step.context_events || []).forEach((event) => section.body.appendChild(renderContextEvent(event)));
       (step.llm_calls || []).forEach((call) => section.body.appendChild(renderLlmCall(call)));
       (step.tool_calls || []).forEach((call) => section.body.appendChild(renderToolCall(call)));
       (step.tool_results || []).forEach((result) => section.body.appendChild(renderToolResult(result)));
@@ -591,6 +626,11 @@
         turn.body.appendChild(traceElement("div", "mt-2 text-xs text-amber-700", "执行中或未完整结束；可稍后重新点击轨迹刷新。"));
       }
       turnInspectorContent.appendChild(turn.details);
+      if (trace.checkpoints?.length) {
+        const checkpoints = traceDetails("Checkpoint 覆盖范围与输入变化", false);
+        checkpoints.body.appendChild(tracePre(trace.checkpoints));
+        turnInspectorContent.appendChild(checkpoints.details);
+      }
       (trace.steps || []).forEach((step) => turnInspectorContent.appendChild(renderTraceStep(step)));
       const final = traceDetails("Final Answer", false);
       final.body.appendChild(tracePre(trace.final_answer || "（尚无最终回答）"));
@@ -598,17 +638,53 @@
     }
 
     function closeTurnInspector() {
+      stopTurnInspectorResize();
       inspectorSessionId = "";
       inspectorTurnId = "";
-      turnInspector.classList.add("hidden");
+      turnInspectorShell.classList.add("hidden");
       turnInspectorMeta.textContent = "";
       turnInspectorContent.replaceChildren();
+    }
+
+    function setTurnInspectorWidth(width) {
+      const maxWidth = window.innerWidth < 768 ? window.innerWidth * 0.94 : Math.min(window.innerWidth * 0.7, 960);
+      const minWidth = Math.min(320, maxWidth);
+      const nextWidth = Math.min(maxWidth, Math.max(minWidth, width));
+      turnInspectorShell.style.width = `${nextWidth}px`;
+      turnInspectorResizeHandle.setAttribute("aria-valuemin", String(Math.ceil(minWidth)));
+      turnInspectorResizeHandle.setAttribute("aria-valuemax", String(Math.floor(maxWidth)));
+      turnInspectorResizeHandle.setAttribute("aria-valuenow", String(Math.round(nextWidth)));
+    }
+
+    function resizeTurnInspector(event) {
+      if (inspectorResizeStart) {
+        setTurnInspectorWidth(inspectorResizeStart.width + inspectorResizeStart.x - event.clientX);
+      }
+    }
+
+    function stopTurnInspectorResize() {
+      inspectorResizeStart = null;
+      document.body.classList.remove("inspector-resizing");
+      document.removeEventListener("mousemove", resizeTurnInspector);
+      document.removeEventListener("mouseup", stopTurnInspectorResize);
+      window.removeEventListener("blur", stopTurnInspectorResize);
+    }
+
+    function startTurnInspectorResize(event) {
+      if (event.button !== 0) return;
+      stopTurnInspectorResize();
+      inspectorResizeStart = { x: event.clientX, width: turnInspectorShell.offsetWidth };
+      document.body.classList.add("inspector-resizing");
+      document.addEventListener("mousemove", resizeTurnInspector);
+      document.addEventListener("mouseup", stopTurnInspectorResize);
+      window.addEventListener("blur", stopTurnInspectorResize);
+      event.preventDefault();
     }
 
     async function openTurnInspector(sessionId, turnId) {
       inspectorSessionId = sessionId;
       inspectorTurnId = turnId;
-      turnInspector.classList.remove("hidden");
+      turnInspectorShell.classList.remove("hidden");
       turnInspectorMeta.textContent = `Turn ${String(turnId).slice(0, 10)}`;
       renderInspectorNotice("正在加载轨迹...");
       try {
@@ -800,6 +876,9 @@
 
     function applyEventToConversationState(messageId, event) {
       switch (event.type) {
+        case "context_status":
+          addRuntimeActivity(messageId, { type: "context", phase: event.phase, content: event.message || "上下文状态已更新" });
+          break;
         case "agent_start":
           addRuntimeActivity(messageId, { type: "agent", status: "running" });
           break;
@@ -857,7 +936,7 @@
           appendMessageContent(messageId, event.delta || "");
           break;
         case "error":
-          addRuntimeActivity(messageId, { type: "error", content: event.content || "Agent 执行失败" });
+          addRuntimeActivity(messageId, { type: "error", content: event.message || event.content || "Agent 执行失败" });
           break;
         case "agent_done":
           setRuntimeStatus(messageId, "final", "completed");
@@ -886,6 +965,9 @@
           return;
         }
         switch (event.event_type) {
+          case "context/status":
+            applyEventToConversationState(messageId, { type: "context_status", ...data });
+            break;
           case "step/start":
             applyEventToConversationState(messageId, { type: "step_start", step: event.step });
             break;
@@ -1266,6 +1348,12 @@
     newChatButton.addEventListener("click", newConversation);
     mobileNewChatButton.addEventListener("click", newConversation);
     closeTurnInspectorButton.addEventListener("click", closeTurnInspector);
+    turnInspectorResizeHandle.addEventListener("mousedown", startTurnInspectorResize);
+    turnInspectorResizeHandle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      setTurnInspectorWidth(turnInspectorShell.offsetWidth + (event.key === "ArrowLeft" ? 20 : -20));
+      event.preventDefault();
+    });
     sendButton.addEventListener("click", sendChatMessage);
     removePendingAttachmentButton.addEventListener("click", removePendingAttachment);
     messageInput.addEventListener("input", resizeTextarea);

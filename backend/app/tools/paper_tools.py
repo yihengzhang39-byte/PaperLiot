@@ -7,7 +7,6 @@ from typing import Any
 from app.runtime.tool_executor import ToolExecutionResult
 from app.agents.nodes.section_extract_node import (
     SECTION_KEYS,
-    extract_sections_by_rules_with_meta,
     extract_sections_from_text,
 )
 from app.runtime.tool_registry import ToolRegistry
@@ -27,11 +26,13 @@ _PAGE_MARKER = re.compile(r"^--- Page (\d+) ---\s*$", re.MULTILINE)
 
 
 def _parser_name(value: str | None) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise retrieval_service.ToolInputError("parser must be a string")
     if value is None or not value.strip():
         return None
     normalized = value.strip().lower()
     if normalized not in PARSER_NAMES:
-        raise ValueError(f"Unsupported parser: {normalized}")
+        raise retrieval_service.ToolInputError("Unsupported parser; expected grobid or pymupdf")
     return normalized
 
 
@@ -52,6 +53,7 @@ def _load_cached_parse(paper_id: str, parser_name: str) -> ParsedPaper | None:
 
 def _parse_with_cache(paper_id: str, parser_name: str) -> tuple[ParsedPaper, bool]:
     """Run exactly the requested parser, or reuse its own cached result."""
+    retrieval_service.validate_paper_id(paper_id)
     cached = _load_cached_parse(paper_id, parser_name)
     if cached is not None:
         return cached, True
@@ -168,13 +170,13 @@ def parse_pdf_with_grobid(paper_id: str = "") -> dict[str, object]:
     return result
 
 
-def _requested_pages(pages: list[int] | None, page_count: int) -> list[int]:
+def _requested_pages(pages: list[int] | None, page_count: int | None) -> list[int]:
     requested = [1] if pages is None else pages
-    if not isinstance(requested, list) or not requested:
-        raise ValueError("pages must be a non-empty list of page numbers")
+    if not isinstance(requested, list) or not 1 <= len(requested) <= 8:
+        raise ValueError("pages must contain 1 to 8 page numbers")
     unique: list[int] = []
     for page in requested:
-        if isinstance(page, bool) or not isinstance(page, int) or not 1 <= page <= page_count:
+        if type(page) is not int or page < 1 or (page_count is not None and page > page_count):
             raise ValueError(f"page must be between 1 and {page_count}")
         if page not in unique:
             unique.append(page)
@@ -196,6 +198,7 @@ def parse_pdf_with_pymupdf(
 ) -> dict[str, object]:
     """Read selected PDF pages with PyMuPDF; defaults to the first page."""
     try:
+        _requested_pages(pages, None)
         parsed, cached = _parse_with_cache(paper_id, "pymupdf")
         meta = getattr(parsed, "parser_meta", {}) or {}
         page_count = int(meta.get("page_count", 0) or 0)
@@ -224,6 +227,7 @@ def _cached_documents(paper_id: str, parser_name: str | None = None) -> list[dic
 
 def get_paper_info(paper_id: str = "", parser: str = "") -> dict[str, object]:
     """Read metadata from parser results already chosen by the Agent; never parse."""
+    retrieval_service.validate_paper_id(paper_id)
     parser_name = _parser_name(parser)
     documents = _cached_documents(paper_id, parser_name)
     primary = documents[0] if len(documents) == 1 else {}
@@ -260,6 +264,7 @@ def _section_result(parsed: Any, parser_name: str) -> dict[str, object]:
 
 def extract_sections(paper_id: str = "", parser: str = "") -> dict[str, object]:
     """Read sections from cached parser results; never select or run a parser."""
+    retrieval_service.validate_paper_id(paper_id)
     parser_name = _parser_name(parser)
     sources = [
         _section_result(parsed, name)
@@ -280,42 +285,6 @@ def extract_sections(paper_id: str = "", parser: str = "") -> dict[str, object]:
     }
 
 
-def _retrieval_sections(parsed: Any) -> dict[str, str]:
-    """Prefer parser-provided sections, then local rule-only sections."""
-    sections = {
-        str(getattr(section, "title", "") or "document"): str(getattr(section, "text", "") or "")
-        for section in getattr(parsed, "sections", []) or []
-        if str(getattr(section, "text", "") or "").strip()
-    }
-    if sections:
-        return sections
-    rule_sections, _ = extract_sections_by_rules_with_meta(str(getattr(parsed, "raw_text", "") or ""))
-    sections = {name: text for name, text in rule_sections.items() if text}
-    return sections or {"document": str(getattr(parsed, "raw_text", "") or "")}
-
-
-def _retrieve_from_cached_parse(
-    paper_id: str,
-    parser_name: str,
-    parsed: Any,
-    query: str,
-    top_k: int | None,
-) -> dict[str, object]:
-    try:
-        result = retrieval_service.retrieve_paper_chunks(
-            paper_id, query, top_k=top_k, parser_name=parser_name
-        )
-    except FileNotFoundError:
-        chunks = retrieval_service.build_paper_chunks(paper_id, _retrieval_sections(parsed))
-        retrieval_service.save_paper_chunks(paper_id, chunks, parser_name=parser_name)
-        result = retrieval_service.retrieve_paper_chunks(
-            paper_id, query, top_k=top_k, parser_name=parser_name
-        )
-    for chunk in result["chunks"]:
-        chunk["parser"] = parser_name
-    return result
-
-
 def retrieve_paper_context(
     paper_id: str = "",
     query: str = "",
@@ -323,14 +292,18 @@ def retrieve_paper_context(
     parser: str = "",
 ) -> dict[str, object]:
     """Retrieve local context from cached parser sources without reparsing a PDF."""
-    if not isinstance(query, str) or not query.strip():
-        raise ValueError("query cannot be empty")
+    retrieval_service.validate_paper_id(paper_id)
+    top_k = retrieval_service.validate_top_k(top_k)
+    if not isinstance(query, str) or not 1 <= len(query.strip()) <= 2000:
+        raise retrieval_service.ToolInputError("query must contain 1 to 2000 characters")
     parser_name = _parser_name(parser)
     sources = []
     for name in ((parser_name,) if parser_name else PARSER_NAMES):
         parsed = _load_cached_parse(paper_id, name)
         if parsed is not None:
-            sources.append(_retrieve_from_cached_parse(paper_id, name, parsed, query, top_k))
+            source = retrieval_service.retrieve_cached_paper_chunks(paper_id, name, parsed, query.strip(), top_k)
+            source["warnings"] = list(getattr(parsed, "parser_warnings", []) or [])
+            sources.append(source)
     return {
         "paper_id": paper_id,
         "query": query.strip(),
@@ -339,6 +312,23 @@ def retrieve_paper_context(
         "sources": sources,
         "warning": "No cached parser result; call a parser Tool first." if not sources else "",
     }
+
+
+def read_paper_chunk(paper_id: str = "", parser: str = "", chunk_id: str = "", cache_version: str = "", offset: int = 0, max_chars: int | None = None) -> dict[str, object]:
+    """Read a versioned local chunk, without parsing, writing or following paths."""
+    retrieval_service.validate_paper_id(paper_id)
+    parser_name = _parser_name(parser)
+    if parser_name is None:
+        raise retrieval_service.ToolInputError("An explicit parser is required for evidence readback")
+    parsed = _load_cached_parse(paper_id, parser_name)
+    if parsed is None:
+        raise retrieval_service.ToolInputError("evidence_cache_missing: no valid existing parser cache; no parse was attempted")
+    result = retrieval_service.read_cached_paper_chunk(paper_id, parser_name, parsed, chunk_id, cache_version, offset=offset, max_chars=max_chars)
+    warnings = list(getattr(parsed, "parser_warnings", []) or [])
+    result.update(warnings=[str(warning)[:160] for warning in warnings[:3]], warnings_omitted_count=max(0, len(warnings) - 3), warnings_truncated=any(len(str(warning)) > 160 for warning in warnings[:3]))
+    # The read Tool itself is bounded, including escaped JSON and metadata.
+    from app.services.tool_result_service import project_tool_result
+    return json.loads(project_tool_result("read_paper_chunk", json.dumps(result, ensure_ascii=False)))
 
 
 def _history_payload(result: ToolExecutionResult) -> dict[str, Any]:
@@ -350,7 +340,7 @@ def _history_payload(result: ToolExecutionResult) -> dict[str, Any]:
 
 
 def _paper_history_failure(result: ToolExecutionResult, payload: dict[str, Any]) -> dict[str, Any]:
-    return {"tool": result.tool_name, "status": "error", "summary": str(payload.get("error") or payload.get("warning") or result.error or "Tool execution failed.")[:300]}
+    return {"tool": result.tool_name, "status": "error", "paper_id": payload.get("paper_id", ""), "parser": payload.get("parser", ""), "summary": str(payload.get("error") or payload.get("warning") or result.error or "Tool execution failed.")[:300]}
 
 
 def project_paper_history(_args: dict[str, Any], result: ToolExecutionResult) -> dict[str, Any]:
@@ -392,7 +382,7 @@ PAPER_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "paper_id": {"type": "string"},
-                    "pages": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1},
+                    "pages": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1, "maxItems": 8},
                 },
                 "required": ["paper_id"],
             },
@@ -432,23 +422,42 @@ PAPER_TOOL_SPECS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "retrieve_paper_context",
-            "description": "Retrieve bounded context from cached parser results only. If no result is cached, call a parser Tool first.",
+            "description": "Retrieve actual evidence from existing parser cache only. Each shown chunk has paper_id/parser/cache_version/chunk_id for read_paper_chunk. Check omitted/coverage: omitted text was not read. No reparsing. If no result is cached, call a parser Tool first.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "paper_id": {"type": "string"},
-                    "query": {"type": "string"},
-                    "top_k": {"type": "integer", "minimum": 1},
+                    "query": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "top_k": {"type": "integer", "minimum": 1, "maximum": retrieval_service.MAX_TOP_K},
                     "parser": {"type": "string", "enum": list(PARSER_NAMES)},
                 },
                 "required": ["paper_id", "query"],
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_paper_chunk",
+            "description": "Read a specified versioned evidence chunk from local parser cache. Copy paper_id, parser, cache_version and chunk_id exactly from evidence_refs or retrieved chunks. Use offset and next_offset to read further; max_chars is bounded by TOOL_READ_MAX_CHARS (default 2000). Only current/active papers are accessible. Stale or missing references fail without reparsing; retrieve again to obtain a new reference.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paper_id": {"type": "string", "maxLength": 128},
+                    "parser": {"type": "string", "enum": list(PARSER_NAMES)},
+                    "chunk_id": {"type": "string", "pattern": "^c_[0-9a-f]{64}$"},
+                    "cache_version": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "max_chars": {"type": "integer", "minimum": 1, "maximum": 4000},
+                },
+                "required": ["paper_id", "parser", "chunk_id", "cache_version"],
+            },
+        },
+    },
 ]
 
 
-def register_paper_tools(registry: ToolRegistry) -> None:
+def register_paper_tools(registry: ToolRegistry, *, allowed_paper_ids: list[str] | None = None) -> None:
     """Register the Agent-selectable parser and cached-paper Tools."""
     registry.register(
         "parse_pdf_with_grobid",
@@ -487,3 +496,9 @@ def register_paper_tools(registry: ToolRegistry) -> None:
         produces=("retrieved_paper_context",),
         project_history_result=project_paper_history,
     )
+    def scoped_read(**arguments: Any) -> dict[str, object]:
+        if allowed_paper_ids is not None and arguments.get("paper_id") not in allowed_paper_ids:
+            raise retrieval_service.ToolInputError("evidence_access_denied: paper_id is outside current/active papers")
+        return read_paper_chunk(**arguments)
+
+    registry.register("read_paper_chunk", scoped_read, is_concurrency_safe=lambda _args: True, project_history_result=project_paper_history)

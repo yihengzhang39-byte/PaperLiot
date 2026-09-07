@@ -13,15 +13,20 @@ from pydantic import BaseModel, Field
 
 from app.agents.agent_loop import AgentMaxStepsError
 from app.agents.paper_agent import run_paper_agent
-from app.core.config import get_llm_config
+from app.core.config import ContextConfigError, get_llm_config
+from app.services.context_service import ContextBudgetError
 from app.services.llm_service import (
     AgentLLMResponse,
+    LLMOutputTruncatedError,
+    LLMStreamInterruptedError,
+    LLMProviderError,
     call_llm_with_tools_stream,
     diagnostic_summary,
     reset_llm_input_diagnostic_session,
     set_llm_input_diagnostic_session,
 )
 from app.services.session_event_service import SessionEventService
+from app.services.session_run_service import SessionBusyError, SessionRun, acquire_session_run
 from app.services.debug_trace_service import DebugTraceService
 from app.services.session_model_history_service import project_session_events_to_messages
 from app.services.session_restore_service import create_session_restore, delete_session_restore, list_session_history, load_session_restore
@@ -177,25 +182,34 @@ def _stream_agent_events(
     message: str,
     session: ChatSessionState,
     paper_id: str | None,
+    lease: SessionRun | None = None,
 ) -> Iterator[str]:
     """Bridge one synchronous Agent run into a safe SSE event iterator."""
+    lease = lease or _acquire_run(session_id)
     queue: Queue[dict[str, object] | None] = Queue()
-    event_log = SessionEventService(session_id)
-    event_log.start(message, paper_id=paper_id, active_paper_ids=session.active_paper_ids)
-    debug_trace = DebugTraceService(session_id, event_log.turn_id)
-    debug_trace.start()
+    try:
+        event_log = SessionEventService(session_id)
+        event_log.start(message, paper_id=paper_id, active_paper_ids=session.active_paper_ids)
+        debug_trace = DebugTraceService(session_id, event_log.turn_id)
+        debug_trace.start()
+    except BaseException:
+        lease.release()
+        raise
 
     def event_sink(event: dict[str, object]) -> None:
         event_log.persist_runtime_event(event)
         queue.put(event)
 
     def run() -> None:
-        diagnostic_token = set_llm_input_diagnostic_session(session_id)
+        diagnostic_token = None
         try:
+            diagnostic_token = set_llm_input_diagnostic_session(session_id)
             result = run_paper_agent(
                 message,
                 paper_id=paper_id,
                 session_id=session_id,
+                turn_id=event_log.turn_id,
+                database_path=event_log.repository.database_path,
                 history=_model_history(session_id, message, event_log.turn_id),
                 system_context=_load_memory_context(),
                 active_paper_ids=session.active_paper_ids,
@@ -205,6 +219,9 @@ def _stream_agent_events(
             )
             _save_chat_turn(session_id, session, message, result.final_answer)
             debug_trace.finish("success")
+        except (ContextBudgetError, ContextConfigError, LLMProviderError, LLMOutputTruncatedError, LLMStreamInterruptedError) as exc:
+            event_log.finish("error", code=exc.code, message=str(exc))
+            debug_trace.finish("error")
         except AgentMaxStepsError:
             logger.warning("Paper Agent reached max steps for session %s", session_id)
             event_log.finish("error", code="agent_max_steps", message="Paper Agent reached max steps.")
@@ -218,22 +235,49 @@ def _stream_agent_events(
             event_log.finish("error", code="agent_failed", message="Paper Agent execution failed.")
             debug_trace.finish("error")
         finally:
-            reset_llm_input_diagnostic_session(diagnostic_token)
-            queue.put(None)
+            try:
+                if diagnostic_token is not None:
+                    reset_llm_input_diagnostic_session(diagnostic_token)
+            finally:
+                lease.release()
+                queue.put(None)
 
     worker = Thread(target=run, daemon=True)
-    worker.start()
     try:
+        worker.start()
+    except BaseException:
+        try:
+            event_log.finish("error", code="agent_failed", message="Agent worker could not start.")
+            debug_trace.finish("error")
+        finally:
+            lease.release()
+        raise
+
+    def events() -> Iterator[str]:
+        # ponytail: disconnect leaves the worker running and owning the session;
+        # cancellation can be added with an explicit stop-generation feature.
         while (event := queue.get()) is not None:
             yield _sse(event)
-    finally:
-        # ponytail: disconnect does not cancel an active provider HTTP call; add
-        # request cancellation tokens when stop-generation behavior is required.
-        pass
+    return events()
+
+
+def _acquire_run(session_id: str) -> SessionRun:
+    try:
+        return acquire_session_run(session_id.strip())
+    except SessionBusyError as exc:
+        raise HTTPException(status_code=409, detail={"code": "session_busy", "message": str(exc)}) from exc
 
 
 @router.post("", response_model=ChatResponse)
 def chat(request: ChatRequest) -> dict[str, str]:
+    lease = _acquire_run(request.session_id)
+    try:
+        return _chat(request)
+    finally:
+        lease.release()
+
+
+def _chat(request: ChatRequest) -> dict[str, str]:
     """处理前端聊天消息，并按 session_id 维护论文上下文和语义历史。"""
     session_id, message, session, paper_id = _prepare_chat(request)
     event_log = SessionEventService(session_id)
@@ -243,10 +287,15 @@ def chat(request: ChatRequest) -> dict[str, str]:
 
     diagnostic_token = set_llm_input_diagnostic_session(session_id)
     try:
-        config = get_llm_config()
+        try:
+            config = get_llm_config()
+        except ValueError as exc:
+            raise ContextConfigError(str(exc)) from exc
         run_options = {
             "paper_id": paper_id,
             "session_id": session_id,
+            "turn_id": event_log.turn_id,
+            "database_path": event_log.repository.database_path,
             "history": _model_history(session_id, message, event_log.turn_id),
             "system_context": _load_memory_context(),
             "active_paper_ids": session.active_paper_ids,
@@ -263,6 +312,11 @@ def chat(request: ChatRequest) -> dict[str, str]:
         _save_chat_turn(session_id, session, message, reply)
         debug_trace.finish("success")
         return {"reply": reply}
+    except (ContextBudgetError, ContextConfigError, LLMProviderError, LLMOutputTruncatedError, LLMStreamInterruptedError) as exc:
+        event_log.finish("error", code=exc.code, message=str(exc))
+        debug_trace.finish("error")
+        status = 413 if isinstance(exc, ContextBudgetError) else 500 if isinstance(exc, ContextConfigError) else 502
+        raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
     except AgentMaxStepsError as exc:
         logger.warning("Paper Agent reached max steps for session %s", session_id)
         event_log.finish("error", code="agent_max_steps", message="Paper Agent reached max steps.")
@@ -285,17 +339,14 @@ def chat(request: ChatRequest) -> dict[str, str]:
 @router.post("/stream")
 def chat_stream(request: ChatRequest) -> StreamingResponse:
     """Stream safe Agent lifecycle events and final LLM deltas as SSE."""
-    session_id, message, session, paper_id = _prepare_chat(request)
-    return StreamingResponse(
-        _stream_agent_events(
-            session_id=session_id,
-            message=message,
-            session=session,
-            paper_id=paper_id,
-        ),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    lease = _acquire_run(request.session_id)
+    try:
+        session_id, message, session, paper_id = _prepare_chat(request)
+        events = _stream_agent_events(session_id=session_id, message=message, session=session, paper_id=paper_id, lease=lease)
+    except BaseException:
+        lease.release()
+        raise
+    return StreamingResponse(events, media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @router.post("/sessions")
@@ -317,7 +368,12 @@ def list_chat_sessions() -> dict[str, object]:
 def delete_chat_session(session_id: str) -> dict[str, object]:
     """Delete a session's own metadata, event log, and paper relations only."""
     try:
-        deleted = delete_session_restore(session_id)
+        lease = _acquire_run(session_id)
+        try:
+            deleted = delete_session_restore(session_id)
+            SESSION_HISTORY.pop(session_id, None)
+        finally:
+            lease.release()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="session_id 无效。") from exc
     if not deleted:

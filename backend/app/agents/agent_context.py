@@ -16,6 +16,11 @@ class AgentContext:
     state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    turn_id: str | None = None
+    database_path: Any = None
+    history: Any = None
+    history_end: int = 1
+
     def __post_init__(self) -> None:
         if self.max_steps < 1:
             raise ValueError("max_steps must be at least 1.")

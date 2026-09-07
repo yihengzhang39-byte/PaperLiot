@@ -94,7 +94,10 @@ def _parse_cache_path(paper_id: str, parser_name: str) -> Path:
         raise ValueError("paper_id must contain only letters, numbers, underscores, or hyphens")
     if not re.fullmatch(r"[a-z0-9_]+", parser_name):
         raise ValueError("parser_name must contain only lowercase letters, numbers, or underscores")
-    return PAPER_PARSE_CACHE_DIR / f"{paper_id}_{parser_name}.json"
+    path = PAPER_PARSE_CACHE_DIR / f"{paper_id}_{parser_name}.json"
+    if not path.resolve().is_relative_to(PAPER_PARSE_CACHE_DIR.resolve()):
+        raise ValueError("Parser cache path must remain inside the local cache directory")
+    return path
 
 
 def save_paper_parse_cache(paper_id: str, parser_name: str, payload: Mapping[str, Any]) -> None:

@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from app.repositories.session_event_repository import SessionEventRepository
 from app.repositories.session_repository import SessionRepository, build_session_title
+from app.services.retrieval_service import evidence_ref
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,9 @@ def _short_text(value: object, limit: int) -> str:
 
 def _sanitize(value: Any, *, limit: int = _MAX_TOOL_VALUE_CHARS, depth: int = 0) -> Any:
     """Keep displayable tool metadata bounded and redact obvious credentials."""
+    reference = evidence_ref(value) if isinstance(value, dict) else None
+    if reference is not None:
+        return {**reference, **{key: value[key] for key in ("offset", "shown_chars", "max_chars") if type(value.get(key)) is int and value[key] >= 0}}
     if depth >= 6:
         return "[truncated]"
     if isinstance(value, str):
@@ -39,6 +43,17 @@ def _sanitize(value: Any, *, limit: int = _MAX_TOOL_VALUE_CHARS, depth: int = 0)
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return _short_text(value, limit)
+
+
+def _history_result(value: Any) -> Any:
+    """Keep the bounded evidence ledger separate from display-only list limits."""
+    result = _sanitize(value, limit=_MAX_SUMMARY_CHARS)
+    if isinstance(value, dict) and isinstance(value.get("evidence_refs"), list):
+        refs = [ref for ref in value["evidence_refs"] if evidence_ref(ref) is not None]
+        result["evidence_refs"] = [_sanitize(ref) for ref in refs[:64]]
+        if len(refs) > 64 or len(refs) != len(value["evidence_refs"]):
+            result["evidence_refs_omitted_count"] = len(value["evidence_refs"]) - len(result["evidence_refs"])
+    return result
 
 
 class SessionEventService:
@@ -124,8 +139,10 @@ class SessionEventService:
                 "name": _short_text(event.get("name", ""), 200),
                 "status": "success" if event.get("status") == "success" else "error",
                 "summary": _short_text(event.get("summary", ""), _MAX_SUMMARY_CHARS),
-                "history_result": _sanitize(event.get("history_result", {}), limit=_MAX_SUMMARY_CHARS),
+                "history_result": _history_result(event.get("history_result", {})),
             }
+        elif event_type == "context_status":
+            self._append("context/status", {key: _sanitize(event[key]) for key in ("phase", "message", "reason", "summary_calls", "retries", "checkpoint_seq", "covered_through_seq", "trigger_reason") if key in event}, step=step)
         elif event_type == "final_delta":
             delta = event.get("delta")
             if isinstance(delta, str):

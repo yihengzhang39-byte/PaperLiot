@@ -56,17 +56,19 @@ class TurnTraceService:
         debug_start = next((event for event in debug_events if event["event_type"] == "turn/debug_start"), None)
         debug_end = next((event for event in reversed(debug_events) if event["event_type"] == "turn/debug_end"), None)
         user_input = _event_data(user_event).get("content") if user_event else _event_data(debug_start).get("user_input")
-        final_answer = _event_data(final_event).get("content") if final_event else TurnTraceService._last_llm_content(debug_events)
+        status = TurnTraceService._status(semantic_events, debug_events)
+        final_answer = _event_data(final_event).get("content") if final_event else TurnTraceService._last_llm_content(debug_events) if status == "success" else None
         steps = TurnTraceService._steps(semantic_events, debug_events)
         return {
             "session_id": session_id,
             "turn_id": turn_id,
-            "status": TurnTraceService._status(semantic_events, debug_events),
+            "status": status,
             "user_input": user_input if isinstance(user_input, str) else None,
             "started_at": (semantic_events[0] if semantic_events else debug_events[0])["created_at"],
             "ended_at": (debug_end or next((event for event in reversed(semantic_events) if event["event_type"] == "turn/end"), None) or debug_events[-1])["created_at"],
             "steps": steps,
             "final_answer": final_answer if isinstance(final_answer, str) else None,
+            "checkpoints": [{"seq": event["seq"], **{key: event["data"].get(key) for key in ("version", "previous_checkpoint_seq", "covered_through_seq", "input_tokens_before", "input_tokens_after", "measurement_kind", "provider", "model")}} for event in semantic_events if event["event_type"] == "context/checkpoint"],
         }
 
     @staticmethod
@@ -95,6 +97,7 @@ class TurnTraceService:
         tool_calls: list[dict[str, Any]] = []
         tool_results: list[dict[str, Any]] = []
         timeline: list[dict[str, Any]] = []
+        context_events: list[dict[str, Any]] = []
         pending_llm: list[int] = []
         call_refs: dict[str, int] = {}
         for event in debug_events:
@@ -113,6 +116,15 @@ class TurnTraceService:
                     calls[index]["output"] = data
                     calls[index]["output_trace_seq"] = trace_seq
                 timeline.append({"trace_seq": trace_seq, "type": event_type, "ref": f"llm_calls.{index}.output"})
+            elif event_type == "llm/error":
+                index = pending_llm.pop(0) if pending_llm else None
+                if index is not None:
+                    calls[index]["error"] = data
+                    calls[index]["error_trace_seq"] = trace_seq
+                timeline.append({"trace_seq": trace_seq, "type": event_type, "ref": f"llm_calls.{index}.error" if index is not None else None})
+            elif event_type in {"llm/context_budget", "context/compaction", "context/recovery"}:
+                context_events.append({"trace_seq": trace_seq, "type": event_type, "data": data})
+                timeline.append({"trace_seq": trace_seq, "type": event_type, "ref": f"context_events.{len(context_events) - 1}"})
             elif event_type == "tool/call_debug":
                 call = {"tool_call_id": data.get("tool_call_id"), "name": data.get("name"), "arguments": data.get("arguments"), "call_index": data.get("model_call_order_index"), "created_at": event["created_at"], "trace_seq": trace_seq, "result_trace_seq": None}
                 tool_calls.append(call)
@@ -129,6 +141,8 @@ class TurnTraceService:
                     "created_at": event["created_at"],
                     "trace_seq": trace_seq,
                     "call_trace_seq": None,
+                    "raw_result_size": data.get("raw_result_size"),
+                    "model_result_size": data.get("model_result_size"),
                     "current_run_result": data.get("current_run_result"),
                     "history_result": data.get("history_result"),
                     "history_projection": {
@@ -156,4 +170,5 @@ class TurnTraceService:
             "tool_calls": tool_calls,
             "tool_results": tool_results,
             "timeline": timeline,
+            "context_events": context_events,
         }

@@ -51,6 +51,19 @@ def _safe(value: Any, *, text_limit: int, depth: int = 0) -> Any:
     return _safe(str(value), text_limit=text_limit, depth=depth + 1)
 
 
+def _usage_counts(usage: Any, depth: int = 0) -> dict[str, Any]:
+    """Keep numeric token accounting; generic secret redaction hides '*tokens'."""
+    if not isinstance(usage, dict) or depth >= 4:
+        return {}
+    return {
+        key: value if type(value) in {int, float} else _usage_counts(value, depth + 1)
+        for key, value in list(usage.items())[:50]
+        if isinstance(key, str) and re.fullmatch(r"[a-z_]+", key)
+        and (key.endswith("tokens") or key.endswith("tokens_details"))
+        and (type(value) in {int, float} or isinstance(value, dict))
+    }
+
+
 class DebugTraceService:
     """Record trace data without allowing observability failures to affect the Agent."""
 
@@ -128,6 +141,8 @@ class DebugTraceService:
             {
                 "content": _safe(response.content, text_limit=_MAX_MESSAGE_CHARS),
                 "content_length": len(response.content),
+                "usage": _usage_counts(getattr(response, "usage", None)),
+                "finish_reason": _safe(getattr(response, "finish_reason", None), text_limit=100),
                 "tool_calls": [
                     {"tool_call_id": _safe(call.id, text_limit=500), "name": _safe(call.name, text_limit=500), "arguments": _safe(call.arguments, text_limit=_MAX_TOOL_PREVIEW_CHARS)}
                     for call in response.tool_calls
@@ -135,6 +150,36 @@ class DebugTraceService:
             },
             step=step,
         )
+
+    def record_compaction(self, attempt: dict[str, Any], *, step: int) -> None:
+        data = _safe(attempt, text_limit=2000)
+        for key in ("main_input_tokens_before", "input_tokens_before", "input_tokens_after", "body_target_tokens"):
+            if type(attempt.get(key)) in {int, float}:
+                data[key] = attempt[key]
+        if "usage" in attempt:
+            data["usage"] = _usage_counts(attempt["usage"])
+        self._record("context/compaction", data, step=step)
+
+    def record_context_budget(self, budget: dict[str, Any], *, step: int) -> None:
+        self._record("llm/context_budget", budget, step=step)
+
+    def record_recovery(self, event: dict[str, Any], *, step: int) -> None:
+        data = _safe(event, text_limit=1000)
+        for key in ("input_tokens_before", "input_tokens_after"):
+            if type(event.get(key)) is int:
+                data[key] = event[key]
+        self._record("context/recovery", data, step=step)
+
+    def record_llm_error(self, error: Exception, *, step: int, usage=None, finish_reason=None) -> None:
+        self._record("llm/error", {
+            "code": getattr(error, "code", "llm_error"),
+            "usage": _usage_counts(usage), "finish_reason": _safe(finish_reason, text_limit=100),
+            "status_code": getattr(error, "status_code", None),
+            "provider_code": _safe(getattr(error, "error_code", None), text_limit=200),
+            "provider_type": _safe(getattr(error, "error_type", None), text_limit=200),
+            "param": _safe(getattr(error, "param", None), text_limit=200),
+            "is_context_overflow": getattr(error, "is_context_overflow", False),
+        }, step=step)
 
     def record_tool_call(self, tool_call: Any, *, step: int, order_index: int) -> None:
         self._record(
@@ -144,18 +189,26 @@ class DebugTraceService:
         )
 
     def record_tool_result(self, result: Any, *, step: int, order_index: int) -> None:
-        model_size = len(result.content)
+        model_content = result.model_content if result.model_content is not None else result.content
+        model_size = len(model_content)
         history = result.history_result or {}
         history_text = _text(history)
         history_size = len(history_text)
-        preview = _safe(result.content, text_limit=_MAX_TOOL_PREVIEW_CHARS)
+        preview = _safe(model_content, text_limit=_MAX_TOOL_PREVIEW_CHARS)
+        try:
+            raw_payload = json.loads(result.content)
+        except (TypeError, ValueError):
+            raw_payload = None
+        failed = not result.ok or isinstance(raw_payload, dict) and raw_payload.get("success") is False
         self._record(
             "tool/result_debug",
             {
                 "tool_call_id": _safe(result.tool_call_id, text_limit=500),
                 "name": _safe(result.tool_name, text_limit=500),
                 "model_call_order_index": order_index,
-                "status": "success" if result.ok else "error",
+                "status": "error" if failed else "success",
+                "raw_result": {"size_chars": len(result.content), "preview": _safe(result.content, text_limit=_MAX_TOOL_PREVIEW_CHARS), "truncated": len(result.content) > _MAX_TOOL_PREVIEW_CHARS},
+                "raw_result_size": len(result.content),
                 "current_run_result": {"type": "text", "size_chars": model_size, "preview": preview, "truncated": model_size > _MAX_TOOL_PREVIEW_CHARS},
                 "history_result": _safe(history, text_limit=_MAX_HISTORY_CHARS),
                 "model_result_size": model_size,

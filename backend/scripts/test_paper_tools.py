@@ -49,6 +49,7 @@ def main() -> None:
         "get_paper_info",
         "extract_sections",
         "retrieve_paper_context",
+        "read_paper_chunk",
     )
     assert [spec["function"]["name"] for spec in paper_tools.PAPER_TOOL_SPECS] == list(registry.names())
 

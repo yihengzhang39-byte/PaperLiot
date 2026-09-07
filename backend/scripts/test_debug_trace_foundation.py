@@ -19,7 +19,8 @@ from app.services.session_model_history_service import project_session_events_to
 
 
 def _events(repository: DebugTraceRepository, session_id: str, turn_id: str) -> list[dict[str, Any]]:
-    return repository.list_by_turn(session_id, turn_id)
+    # Budget events have their own assertions in test_context_budget.
+    return [event for event in repository.list_by_turn(session_id, turn_id) if event["event_type"] != "llm/context_budget"]
 
 
 def _run_large_tool(database: Path) -> None:
@@ -56,9 +57,9 @@ def _run_large_tool(database: Path) -> None:
     assert second_input[-1]["origin"] == "current_run_tool_result"
     tool_result = events[4]["data"]
     assert tool_result["tool_call_id"] == "large" and tool_result["model_call_order_index"] == 0
-    assert tool_result["current_run_result"]["truncated"] is True
+    assert tool_result["raw_result"]["truncated"] is True
     assert len(tool_result["current_run_result"]["preview"]) <= 4_001
-    assert tool_result["model_result_size"] > 100_000 > tool_result["history_result_size"]
+    assert tool_result["raw_result_size"] > 100_000 > tool_result["model_result_size"] > tool_result["history_result_size"]
     assert tool_result["history_result"] == {"operation_id": "TRACE_TEST_7X92", "status": "success"}
     assert tool_result["history_projection"]["projector"] == "<lambda>"
     stored = json.dumps(events, ensure_ascii=False)

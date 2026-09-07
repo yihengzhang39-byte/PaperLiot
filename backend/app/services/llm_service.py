@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+from time import perf_counter
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from collections.abc import Iterator
@@ -92,6 +93,9 @@ class AgentLLMResponse:
 
     content: str
     tool_calls: list[AgentToolCall]
+    usage: dict[str, Any] | None = None
+    finish_reason: str | None = None
+    elapsed_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +114,61 @@ class AgentLLMDelta:
 
     content: str = ""
     tool_calls: list[AgentToolCallDelta] | None = None
+    usage: dict[str, Any] | None = None
+    finish_reason: str | None = None
+
+
+class LLMProviderError(RuntimeError):
+    """Retain provider evidence without putting raw response bodies in public errors."""
+
+    def __init__(self, provider: str, status_code: int | None, body: str) -> None:
+        self.provider = provider
+        self.status_code = status_code
+        self.body = body
+        try:
+            payload = json.loads(body)
+        except (ValueError, TypeError):
+            payload = {}
+        error = payload.get("error", payload) if isinstance(payload, dict) else {}
+        error = error if isinstance(error, dict) else {}
+        self.error_code = error.get("code")
+        self.error_type = error.get("type")
+        self.param = error.get("param")
+        self.provider_message = str(error.get("message", ""))
+        explicit_code = str(self.error_code) in {
+            "context_length_exceeded", "context_window_exceeded", "input_tokens_exceeded",
+        } or str(self.error_type) in {"context_length_exceeded", "context_window_exceeded"}
+        explicit_message = bool(re.search(
+            r"maximum context length.{0,100}(?:exceed|requested|resulted)|"
+            r"(?:exceed\w*.{0,60}(?:context (?:length|window)|input token limit))|"
+            r"(?:context (?:length|window)|input token limit).{0,60}exceed",
+            self.provider_message, re.IGNORECASE,
+        ))
+        self.is_context_overflow = provider in {"deepseek", "openai_compatible"} and status_code in {None, 400, 413, 422} and (explicit_code or explicit_message)
+        self.code = "provider_context_exceeded" if self.is_context_overflow else "llm_provider_error"
+        super().__init__(
+            "Provider 拒绝了超出上下文容量的请求。"
+            if self.is_context_overflow else f"LLM provider HTTP error {status_code}." if status_code is not None else "LLM provider stream error."
+        )
+
+
+class LLMStreamInterruptedError(RuntimeError):
+    """Partial public content/tool fragments cannot be safely replayed."""
+
+    code = "llm_stream_interrupted"
+
+    def __init__(self) -> None:
+        super().__init__("回答流中断，已收到正文或部分工具调用，未自动重放；部分工具调用不会执行。")
+
+
+class LLMOutputTruncatedError(RuntimeError):
+    """A length-limited answer or tool call must not be treated as completed."""
+
+    code = "llm_output_truncated"
+
+    def __init__(self, response: AgentLLMResponse) -> None:
+        self.response = response
+        super().__init__("LLM 输出达到生成上限而被截断；不会自动重试已截断的输出。")
 
 
 """
@@ -208,7 +267,7 @@ def _request_chat_completion(body: dict[str, Any], config: LLMConfig) -> dict[st
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"LLM HTTP error {exc.code}: {error_body}") from exc
+        raise LLMProviderError(config.provider, exc.code, error_body) from exc
     except URLError as exc:
         raise RuntimeError(f"Failed to connect to LLM provider: {exc.reason}") from exc
     except TimeoutError as exc:
@@ -222,7 +281,7 @@ def _request_chat_completion(body: dict[str, Any], config: LLMConfig) -> dict[st
         raise RuntimeError(f"Unexpected LLM response shape: {payload}") from exc
     if not isinstance(message, dict):
         raise RuntimeError(f"Unexpected LLM message shape: {message}")
-    return message
+    return {**message, "usage": payload.get("usage"), "finish_reason": payload["choices"][0].get("finish_reason")}
 
 
 def _validate_real_llm_config(config: LLMConfig) -> None:
@@ -248,17 +307,40 @@ def call_llm_json(system_prompt: str, user_prompt: str) -> dict[str, Any]:
     return _parse_json_response(content)
 
 
+def call_llm_summary(messages: list[dict[str, Any]], *, config: LLMConfig, budget_config: Any) -> AgentLLMResponse:
+    """One non-streaming, tool-free auxiliary request with its own output reserve."""
+    from app.services.context_service import check_request
+
+    check_request(messages, [], budget_config, model=config.model).require_sendable()
+    started = perf_counter()
+    if config.provider == "mock":
+        # No fabricated summary in mock mode; callers retain their last valid context.
+        return AgentLLMResponse("", [], finish_reason="stop", elapsed_ms=0)
+    _validate_real_llm_config(config)
+    body = {"model": config.model, "messages": messages, "temperature": config.temperature}
+    _set_output_limit(body, budget_config.max_output_tokens, budget_config.output_token_parameter)
+    message = _request_chat_completion(body, config)
+    if message.get("tool_calls"):
+        raise ValueError("summary_unexpected_tool_calls")
+    return AgentLLMResponse(message.get("content") or "", [], usage=message.get("usage"), finish_reason=message.get("finish_reason"), elapsed_ms=(perf_counter() - started) * 1000)
+
+
 def call_llm_with_tools(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    *,
+    max_output_tokens: int | None = None,
+    output_token_parameter: str = "max_tokens",
+    config: LLMConfig | None = None,
 ) -> AgentLLMResponse:
     """Call the configured provider with OpenAI-compatible tool definitions."""
-    config = get_llm_config()
+    config = config or get_llm_config()
     if config.provider == "mock":
         _capture_provider_input(messages)
         return AgentLLMResponse(
             content="当前处于 mock 模式，未执行工具调用。",
             tool_calls=[],
+            finish_reason="stop",
         )
 
     _validate_real_llm_config(config)
@@ -270,6 +352,7 @@ def call_llm_with_tools(
         "tool_choice": "auto",
         "temperature": config.temperature,
     }
+    _set_output_limit(body, max_output_tokens, output_token_parameter)
     _capture_provider_input(body["messages"])
     message = _request_chat_completion(body, config)
     tool_calls: list[AgentToolCall] = []
@@ -294,7 +377,19 @@ def call_llm_with_tools(
         )
 
     content = message.get("content")
-    return AgentLLMResponse(content=content if isinstance(content, str) else "", tool_calls=tool_calls)
+    return AgentLLMResponse(
+        content=content if isinstance(content, str) else "", tool_calls=tool_calls,
+        usage=message.get("usage"), finish_reason=message.get("finish_reason"),
+    )
+
+
+def _set_output_limit(body: dict[str, Any], limit: int | None, parameter: str) -> None:
+    if parameter not in {"max_tokens", "max_completion_tokens"}:
+        raise ValueError("Unsupported output token parameter.")
+    if limit is not None:
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("max_output_tokens must be a positive integer.")
+        body[parameter] = limit
 
 
 def _tool_call_deltas(value: Any) -> list[AgentToolCallDelta]:
@@ -325,7 +420,7 @@ def _tool_call_deltas(value: Any) -> list[AgentToolCallDelta]:
 
 def _stream_chat_completion(body: dict[str, Any], config: LLMConfig) -> Iterator[AgentLLMDelta]:
     """Yield real OpenAI-compatible SSE deltas without buffering the answer."""
-    body = {**body, "stream": True}
+    body = {**body, "stream": True, "stream_options": {"include_usage": True}}
     request = Request(
         url=f"{config.base_url}/chat/completions",
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -338,6 +433,7 @@ def _stream_chat_completion(body: dict[str, Any], config: LLMConfig) -> Iterator
     )
     try:
         with urlopen(request, timeout=config.timeout) as response:
+            completed = False
             for raw_line in response:
                 line = raw_line.decode("utf-8").strip()
                 if not line.startswith("data:"):
@@ -347,17 +443,39 @@ def _stream_chat_completion(body: dict[str, Any], config: LLMConfig) -> Iterator
                     return
                 try:
                     payload = json.loads(payload_text)
-                    delta = payload["choices"][0]["delta"]
+                    if not isinstance(payload, dict):
+                        raise TypeError("SSE payload must be an object")
+                    if "error" in payload:
+                        raise LLMProviderError(config.provider, None, payload_text)
+                    usage = payload.get("usage")
+                    choices = payload.get("choices", [] if isinstance(usage, dict) else None)
+                    if not isinstance(choices, list):
+                        raise TypeError("SSE choices must be a list")
+                    if choices == []:
+                        if isinstance(usage, dict):
+                            yield AgentLLMDelta(usage=usage)
+                        continue
+                    choice = choices[0]
+                    if not isinstance(choice, dict):
+                        raise TypeError("SSE choice must be an object")
+                    delta = choice.get("delta") or {}
+                    finish_reason = choice.get("finish_reason")
+                    completed = completed or finish_reason is not None
                 except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
                     raise RuntimeError("LLM streaming response contained an invalid SSE event.") from exc
                 if not isinstance(delta, dict):
                     continue
                 content = delta.get("content")
                 tool_calls = _tool_call_deltas(delta.get("tool_calls"))
-                if isinstance(content, str) or tool_calls:
-                    yield AgentLLMDelta(content=content if isinstance(content, str) else "", tool_calls=tool_calls)
+                if isinstance(content, str) or tool_calls or finish_reason is not None or isinstance(usage, dict):
+                    yield AgentLLMDelta(
+                        content=content if isinstance(content, str) else "", tool_calls=tool_calls,
+                        usage=usage if isinstance(usage, dict) else None, finish_reason=finish_reason,
+                    )
+            if not completed:
+                raise RuntimeError("LLM stream ended without a completion event.")
     except HTTPError as exc:
-        raise RuntimeError(f"LLM HTTP error {exc.code}.") from exc
+        raise LLMProviderError(config.provider, exc.code, exc.read().decode("utf-8", errors="replace")) from exc
     except URLError as exc:
         raise RuntimeError(f"Failed to connect to LLM provider: {exc.reason}") from exc
     except TimeoutError as exc:
@@ -367,12 +485,16 @@ def _stream_chat_completion(body: dict[str, Any], config: LLMConfig) -> Iterator
 def call_llm_with_tools_stream(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    *,
+    max_output_tokens: int | None = None,
+    output_token_parameter: str = "max_tokens",
+    config: LLMConfig | None = None,
 ) -> Iterator[AgentLLMDelta]:
     """Yield native provider deltas for one tool-capable LLM turn."""
-    config = get_llm_config()
+    config = config or get_llm_config()
     if config.provider == "mock":
         _capture_provider_input(messages)
-        yield AgentLLMDelta(content="当前处于 mock 模式，未执行工具调用。")
+        yield AgentLLMDelta(content="当前处于 mock 模式，未执行工具调用。", finish_reason="stop")
         return
 
     _validate_real_llm_config(config)
@@ -384,6 +506,7 @@ def call_llm_with_tools_stream(
         "tool_choice": "auto",
         "temperature": config.temperature,
     }
+    _set_output_limit(body, max_output_tokens, output_token_parameter)
     _capture_provider_input(body["messages"])
     yield from _stream_chat_completion(body, config)
 

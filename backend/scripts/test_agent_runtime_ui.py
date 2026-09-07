@@ -51,7 +51,14 @@ def main() -> None:
         "async function initializeConversation()",
         "initializeConversation();",
         'id="turnInspector"',
+        'id="turnInspectorResizeHandle"',
         'id="closeTurnInspectorButton"',
+        "function startTurnInspectorResize(event)",
+        "function stopTurnInspectorResize()",
+        "function resizeTurnInspector(event)",
+        "inspectorResizeStart.width + inspectorResizeStart.x - event.clientX",
+        'document.removeEventListener("mousemove", resizeTurnInspector)',
+        'document.removeEventListener("mouseup", stopTurnInspectorResize)',
         "function openTurnInspector(sessionId, turnId)",
         "function closeTurnInspector()",
         "function renderTurnTrace(trace)",
@@ -78,6 +85,8 @@ def main() -> None:
         "执行中或未完整结束；可稍后重新点击轨迹刷新。",
     ):
         assert text in page
+    assert "event.button !== 0 || window.innerWidth < 768" not in page
+    assert "window.innerWidth < 768 ? window.innerWidth * 0.94" in page
     print("ALL AGENT RUNTIME UI TESTS PASSED")
 
 
